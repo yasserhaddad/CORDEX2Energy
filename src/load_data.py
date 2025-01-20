@@ -1,83 +1,38 @@
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Union
 import numpy as np
 import xarray as xr
 import pandas as pd
+import matplotlib.pyplot as plt
+from .timesteps_adjustments import get_new_timesteps
 
 
-def extract_adjusted_timesteps(
-    df_climate_models_mapping: pd.DataFrame,
-    climate_model_chain: str,
-    climate_scenario: str,
-) -> Dict[str, pd.DatetimeIndex]:
-    """Extract adjusted timesteps from EURO-CORDEX climate models mapping file for a given
-    climate model chain and scenario combination. This mapping shrinks the timesteps of the
-    original simulation to obtain a faster warming that aligns with the CMIP6 GCM model equivalent
-    of the GCM driving the EURO-CORDEX model.
-
-    Parameters
-    ----------
-    df_climate_models_mapping : pd.DataFrame
-        pandas DataFrame containing the timesteps mapping for the EURO-CORDEX climate models.
-        It contains the columns "name", "scenarios_mapped", "year_list", "start_year".
-    climate_model_chain : str
-        The name of the EURO-CORDEX climate model chain.
-    climate_scenario : str
-        The acronym of the climate scenario. Can either be "rcp26", "rcp45" or "rcp85".
-
-    Returns
-    -------
-    Dict[str, pd.DatetimeIndex]
-        A dictionary containing the original timesteps to select from the simulation
-        and the new timesteps for the adjusted timeseries.
-
-    Raises
-    ------
-    ValueError
-        If the climate model chain and scenario combination is not found in the mapping file.
-    """
-    mapping = df_climate_models_mapping[
-        (df_climate_models_mapping["name"].str.contains(climate_model_chain))
-        & (df_climate_models_mapping["scenarios_mapped"] == climate_scenario)
-    ]
-    if mapping.empty:
-        raise ValueError(
-            f'''Climate model chain {climate_model_chain} for climate scenario
-            {climate_scenario} not found in mapping file'''
-        )
-
-    timesteps = None
-    for y in mapping.year_list.item():
-        r = pd.date_range(f"12-01-{y-1} 00:00", f"11-30-{y} 00:00", freq="D")
-        if timesteps is None:
-            timesteps = r
-        else:
-            timesteps = timesteps.union(r)
-    adjusted_timesteps = {"original_timesteps": timesteps}
-    adjusted_timesteps["new_timesteps"] = pd.date_range(
-        f"12-01-{mapping.start_year.item()-1} 00:00", periods=len(timesteps), freq="D"
-    )
-
-    return adjusted_timesteps
-
-
-class ClimateData:
+class ClimateModelData:
     def __init__(
         self,
         path_climate_data: Path,
         path_climate_data_historical: Path = None,
         adjusted_timesteps: Dict[str, pd.DatetimeIndex] = None,
+        subset_data_vars: List[str] = None,
         chunks: Dict[str, int] = None,
         extent: Dict[str, float] = None,
+        load: bool = True,
     ):
-        self.ds_data = xr.open_mfdataset(path_climate_data.glob("*")).sortby("time")
+        if path_climate_data.is_dir():
+            self.ds_data = xr.open_mfdataset(
+                path_climate_data.glob("*"), chunks=chunks
+            ).sortby("time")
+        else:
+            self.ds_data = xr.open_dataset(path_climate_data, chunks=chunks).sortby(
+                "time"
+            )
 
         if path_climate_data_historical is not None:
             self.ds_data = xr.concat(
                 [
-                    xr.open_mfdataset(path_climate_data_historical.glob("*")).sortby(
-                        "time"
-                    ),
+                    xr.open_mfdataset(
+                        path_climate_data_historical.glob("*"), chunks=chunks
+                    ).sortby("time"),
                     self.ds_data,
                 ],
                 dim="time",
@@ -85,9 +40,14 @@ class ClimateData:
 
         if adjusted_timesteps is not None:
             self.ds_data = self.ds_data.sel(
-                time=adjusted_timesteps["original_timesteps"]
+                time=self.ds_data.time.dt.floor("D").isin(
+                    adjusted_timesteps["original_timesteps"]
+                )
             )
-            self.ds_data["time"] = adjusted_timesteps["new_timesteps"]
+            self.ds_data["time"] = get_new_timesteps(adjusted_timesteps, self.ds_data)
+
+        if subset_data_vars is not None:
+            self.ds_data = self.ds_data[subset_data_vars]
 
         if extent is not None:
             self.ds_data = self.ds_data.where(
@@ -98,5 +58,41 @@ class ClimateData:
                 drop=True,
             )
 
-        if chunks is not None:
-            self.ds_data = self.ds_data.chunk(chunks)
+        if load:
+            self.ds_data = self.ds_data.compute()
+
+    def plot_annual_mean(
+        self,
+        data_var: str,
+        spatial_mean: bool = False,
+        ax: plt.Axes = None,
+        title: str = None,
+        save: bool = False,
+        output_filename: str = None,
+        file_format: str = "pdf",
+        **kwargs_plot,
+    ):
+        if ax is None:
+            _, ax = plt.subplots(**kwargs_plot)
+        ds_mean = self.ds_data[data_var].groupby("time.year").mean(skipna=True)
+        if spatial_mean:
+            ds_mean = ds_mean.mean(dim=["y", "x"], skipna=True)
+
+        ds_mean.plot(ax=ax)
+        if title is not None:
+            ax.set_title(title)
+        if ax is None:
+            plt.show()
+
+
+class ClimateReanalysisData:
+    def __init__(self, path_reanalysis_data: Path, chunks: Dict[str, int] = None):
+        if path_reanalysis_data.is_dir():
+            self.ds_data = xr.open_mfdataset(
+                path_reanalysis_data.glob("*"), chunks=chunks
+            ).sortby("time")
+        else:
+            self.ds_data = xr.open_dataset(path_reanalysis_data, chunks=chunks).sortby(
+                "time"
+            )
+        
