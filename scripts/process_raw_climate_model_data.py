@@ -1,17 +1,18 @@
 import sys
-from typing import Tuple
 
 sys.path.append("..")
 
 import ast
 import json
-from pathlib import Path
-import pandas as pd
+import shutil
 import argparse
+import pandas as pd
+from pathlib import Path
 from time import time
-from src.encodings import REDUCED_NETCDF_ENCODINGS
-from src.load_data import ClimateModelData
+from src.constants import COMPRESSED_ZARR_ENCODING
+from src.load_data import ClimateModelData, cdo_remap
 from src.timesteps_adjustments import extract_adjusted_timesteps
+from src.utils_load_data import get_raw_cordex_data_paths
 
 
 def get_adjusted_timesteps(
@@ -27,45 +28,6 @@ def get_adjusted_timesteps(
     return extract_adjusted_timesteps(
         df_climate_models_mapping, climate_model_chain, climate_scenario
     )
-
-
-def get_raw_cordex_data_paths(
-    path_data_cordex: Path,
-    climate_model_chain: str,
-    climate_scenario: str,
-    variable: str,
-    temp_res: str,
-) -> Tuple[Path, Path]:
-    climate_model_chain = "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
-    climate_scenario = "rcp85"
-
-    institute = climate_model_chain.split("-")[0]
-    rcm = climate_model_chain.split("_")[0]
-    gcm = climate_model_chain.split("_")[1]
-    ensemble = climate_model_chain.split("_")[-1]
-
-    cordex_tas = (
-        path_data_cordex
-        / climate_scenario
-        / temp_res
-        / variable
-        / institute
-        / gcm
-        / rcm
-        / ensemble
-    )
-    cordex_tas_hist = (
-        path_data_cordex
-        / "historical"
-        / temp_res
-        / variable
-        / institute
-        / gcm
-        / rcm
-        / ensemble
-    )
-
-    return cordex_tas, cordex_tas_hist
 
 
 if __name__ == "__main__":
@@ -85,8 +47,6 @@ if __name__ == "__main__":
     path_data_cordex = Path(paths["path_data_cordex"])
     path_data_adjusted_cordex = Path(paths["path_data_adjusted_cordex"])
 
-    extent = {"lat_min": 45, "lat_max": 48, "lon_min": 5.8, "lon_max": 10.8}
-
     time_start = time()
     cordex_tas, cordex_tas_hist = get_raw_cordex_data_paths(
         path_data_cordex,
@@ -95,14 +55,46 @@ if __name__ == "__main__":
         args.variable,
         args.temp_res,
     )
+
+    temp_output_dir = (
+        path_data_processed
+        / "cordex_processed"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / "temp"
+        / args.variable
+    )
+    temp_output_dir.mkdir(parents=True, exist_ok=True)
+    (temp_output_dir / "hist").mkdir(parents=True, exist_ok=True)
+    (temp_output_dir / "future").mkdir(parents=True, exist_ok=True)
+    for sim_path in cordex_tas_hist.glob("*.nc"):
+        cdo_remap(
+            str(sim_path),
+            str(temp_output_dir / "hist" / sim_path.name),
+            "conservative",
+            path_data_processed / "climate_grids" / "grid_EUR11_lonlat_griddes.txt",
+        )
+    for sim_path in cordex_tas.glob("*.nc"):
+        cdo_remap(
+            str(sim_path),
+            str(temp_output_dir / "future" / sim_path.name),
+            "conservative",
+            path_data_processed / "climate_grids" / "grid_EUR11_lonlat_griddes.txt",
+        )
+
+    print(
+        f"\tRemapping time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."
+    )
+
     adjusted_timesteps = get_adjusted_timesteps(
         path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
     )
 
-    chunks = {"time": 2000, "lat": 100, "lon": 100}
+    chunks = None
+    extent = None
+
     climate_data = ClimateModelData(
-        cordex_tas,
-        cordex_tas_hist,
+        temp_output_dir / "future",
+        temp_output_dir / "hist",
         adjusted_timesteps,
         subset_data_vars=[args.variable],
         chunks=chunks,
@@ -112,18 +104,28 @@ if __name__ == "__main__":
 
     output_path = (
         path_data_processed
-        / "cordex-processed"
+        / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
-        / "raw"
+        / "regridded"
     )
+
     output_path.mkdir(parents=True, exist_ok=True)
 
-    climate_data.ds_data.to_netcdf(
-        output_path / f"{args.variable}_ch.nc",
-        encoding={
-            var: REDUCED_NETCDF_ENCODINGS for var in climate_data.ds_data.data_vars
-        },
+    target_chunks = {"time": 500, "lat": 256, "lon": 256}
+
+    zarr_encoding = {
+        var: {
+            "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
+            "chunks": tuple(target_chunks.values()),
+        }
+        for var in climate_data.ds_data.data_vars
+    }
+    climate_data.ds_data.chunk(target_chunks).to_zarr(
+        output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
     )
+
+    shutil.rmtree(temp_output_dir)
+
     print(
-        f"\tProcessing time for variable {args.variable}: {(time() - time_start)/60:.2f} minutes."
+        f"\tProcessing time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."
     )
