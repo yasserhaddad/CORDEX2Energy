@@ -166,6 +166,8 @@ class ClimateModelData:
         future_period: Tuple[str, str],
         bias_correction_method: str,
         parametric_existing_settings: bool = False,
+        running_window_mode: bool = True,
+        running_window_length: int = 91,
         **kwargs,
     ) -> xr.Dataset:
         """
@@ -185,15 +187,28 @@ class ClimateModelData:
             correction method function.
         """
         if bias_correction_method == "quantile_mapping":
-            bc = QuantileMapping()
+            bc = QuantileMapping
         elif bias_correction_method == "ISIMIP":
-            bc = ISIMIP()
+            bc = ISIMIP
 
         if parametric_existing_settings:
             if data_var.startswith("wind"):
-                bc = bc.from_variable("sfcWind")
+                bc = bc.from_variable(
+                    "sfcWind",
+                    running_window_mode=running_window_mode,
+                    running_window_length=running_window_length,
+                )
             else:
-                bc = bc.from_variable(data_var)
+                bc = bc.from_variable(
+                    data_var,
+                    running_window_mode=running_window_mode,
+                    running_window_length=running_window_length,
+                )
+        else:
+            bc = bc(
+                running_window_mode=running_window_mode,
+                running_window_length=running_window_length,
+            )
 
         time_res = get_time_resolution(self.ds_data)
         if time_res < pd.Timedelta(days=1):
@@ -219,16 +234,14 @@ class ClimateModelData:
                     ds_reference_data.values,
                     ds_climate_model_data_past.values,
                     ds_climate_model_data_future.values,
-                    **kwargs
+                    **kwargs,
                 )
             )
         else:
             list_ds_debiased = []
             for hour in hours:
                 list_ds_debiased.append(
-                    get_specific_hourly_data(
-                        ds_climate_model_data_future, hour
-                    ).copy(
+                    get_specific_hourly_data(ds_climate_model_data_future, hour).copy(
                         data=bc.apply(
                             get_specific_hourly_data(ds_reference_data, hour).values,
                             get_specific_hourly_data(
@@ -237,7 +250,7 @@ class ClimateModelData:
                             get_specific_hourly_data(
                                 ds_climate_model_data_future, hour
                             ).values,
-                            **kwargs
+                            **kwargs,
                         )
                     )
                 )

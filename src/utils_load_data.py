@@ -23,7 +23,7 @@ def get_raw_cordex_data_paths(
         climate_model_chain
     )
 
-    cordex_tas = (
+    cordex_var = (
         path_data_cordex
         / climate_scenario
         / temp_res
@@ -33,7 +33,8 @@ def get_raw_cordex_data_paths(
         / rcm
         / ensemble
     )
-    cordex_tas_hist = (
+
+    cordex_var_hist = (
         path_data_cordex
         / "historical"
         / temp_res
@@ -44,4 +45,4 @@ def get_raw_cordex_data_paths(
         / ensemble
     )
 
-    return cordex_tas, cordex_tas_hist
+    return cordex_var, cordex_var_hist
