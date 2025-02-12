@@ -35,17 +35,19 @@ for tas_file, rh_file, pressure_file in zip(
     year = tas_file.stem.split("_")[-1]
     print(year)
     # Load the data for the current year
-    chunks = {"time": 2920, "lat": 40, "lon": 40}
-    ds_tas = xr.open_dataset(tas_file, chunks=chunks).sortby("time")
-    ds_rh = xr.open_dataset(rh_file, chunks=chunks).sortby("time")
-    ds_pressure = xr.open_dataset(pressure_file, chunks=chunks).sortby("time")
+    chunks = {"time": 2920, "y": 40, "x": 40}
+    ds_tas = xr.open_dataset(tas_file).chunk(chunks=chunks).sortby("time")
+    ds_rh = xr.open_dataset(rh_file).chunk(chunks=chunks).sortby("time")
+    ds_pressure = xr.open_dataset(pressure_file).chunk(chunks=chunks).sortby("time")
 
     # Calculate specific humidity
-    ds_sh = calculate_specific_humidity(ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"])
+    ds_sh = ds_tas.copy({"2t":
+        calculate_specific_humidity(ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"])
+    }).rename({"2t": "q"})
 
     # Save the specific humidity data
     output_path = (
         path_data_processed / "cerra_processed" / "q" / f"q_3hr_cerra_{year}.nc"
     )
     ds_sh.to_netcdf(output_path)
-    print(f"\tProcessing time: {(time() - t_start) / 60:.2f} minutes.")
+    print(f"\tProcessing time: {(time.time() - t_start) / 60:.2f} minutes.")

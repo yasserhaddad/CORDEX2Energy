@@ -107,6 +107,7 @@ if __name__ == "__main__":
         / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "regridded"
+        / args.temp_res
     )
 
     output_path.mkdir(parents=True, exist_ok=True)

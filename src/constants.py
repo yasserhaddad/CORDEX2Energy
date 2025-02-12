@@ -9,5 +9,5 @@ REDUCED_NETCDF_ENCODINGS = {
 }
 
 COMPRESSED_ZARR_ENCODING = {
-    "compressor": zarr.Blosc(cname="zstd", clevel=1, shuffle=zarr.Blosc.SHUFFLE)
+    "compressor": zarr.Blosc(cname="zstd", clevel=3, shuffle=zarr.Blosc.SHUFFLE)
 }

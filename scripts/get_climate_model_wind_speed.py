@@ -22,7 +22,7 @@ def convert_cordex_wind_components_to_speed(
     climate_model_chain: str,
     climate_scenario: str,
     height: int,
-    output_dir: Path
+    output_dir: Path,
 ):
     institute, _, gcm, _ = get_components_climate_model_chain(climate_model_chain)
 
@@ -32,43 +32,37 @@ def convert_cordex_wind_components_to_speed(
     # Load the data paths
     u_path = sorted(
         list(
-            (
-                path_data_personal_cordex
-                / institute
-                / gcm
-                / climate_scenario
-            ).rglob(f"*/ua{height}m")
+            (path_data_personal_cordex / institute / gcm / climate_scenario).rglob(
+                f"*/ua{height}m"
+            )
         )[0].glob("*/*.nc")
     )
     v_path = sorted(
         list(
-            (
-                path_data_personal_cordex
-                / institute
-                / gcm
-                / climate_scenario
-            ).rglob(f"*/va{height}m")
+            (path_data_personal_cordex / institute / gcm / climate_scenario).rglob(
+                f"*/va{height}m"
+            )
         )[0].glob("*/*.nc")
     )
 
-    t_start = time.time()
     print("Calculating wind speed...")
     # Iterate over each year of data
     for u_file, v_file in zip(u_path, v_path):
+        t_start = time.time()
         print(f"\tProcessing {u_file.stem.split('_')[-1]}")
         # Load the data for the current year
-        chunks = {"time": 2920, "y": 40, "x": 40}
-        ds_u = xr.open_dataset(u_file).chunk(chunks=chunks).sortby("time")
-        ds_v = xr.open_dataset(v_file).chunk(chunks=chunks).sortby("time")
+        # chunks = {"time": 2920, "y": 40, "x": 40}
+        ds_u = xr.open_dataset(u_file).sortby("time").compute()
+        ds_v = xr.open_dataset(v_file).sortby("time").compute()
 
         # Calculate wind speed
-        ds_wind = xr.Dataset(
+        ds_wind = ds_u.copy(
             {
-                f"wind{height}m": convert_wind_components_to_speed(
+                f"ua{height}m": convert_wind_components_to_speed(
                     ds_u[f"ua{height}m"], ds_v[f"va{height}m"]
                 )
             }
-        )
+        ).rename({f"ua{height}m": f"wind{height}m"})
 
         # Save the wind speed data
         filename = u_file.name.replace(f"ua{height}m", f"wind{height}m")
@@ -89,7 +83,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with open("../paths.json") as f:
         paths = json.load(f)
-
 
     cordex_wind, cordex_wind_hist = get_raw_cordex_data_paths(
         Path(paths["path_data_personal"]) / "cordex" / "EUR-11",

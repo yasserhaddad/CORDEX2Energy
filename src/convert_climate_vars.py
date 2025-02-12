@@ -22,7 +22,7 @@ def convert_wind_components_to_speed(u: xr.DataArray, v: xr.DataArray) -> xr.Dat
         lambda x, y: np.sqrt(x**2 + y**2),
         u,
         v,
-        dask="parallelized",
+        # dask="parallelized",
         output_dtypes=[np.float32],
     )
 

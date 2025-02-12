@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 from typing import Dict, List, Tuple
 import numpy as np
 import xarray as xr
@@ -87,16 +88,18 @@ class ClimateModelData:
         chunks: Dict[str, int] = None,
         extent: Dict[str, float] = None,
         reordered_coords: List[str] = None,
-        load: bool = True,
+        drop_leap_days: bool = True,
+        load: bool = False,
     ):
-        if path_climate_data.is_dir():
-            self.ds_data = xr.open_mfdataset(
-                path_climate_data.glob("*"), chunks=chunks
-            ).sortby("time")
+        if path_climate_data.name.endswith(".zarr"):
+            self.ds_data = xr.open_zarr(path_climate_data, chunks=chunks)
+        elif path_climate_data.is_dir():
+            self.ds_data = xr.open_mfdataset(path_climate_data.glob("*"), chunks=chunks).sortby("time")
         else:
-            self.ds_data = xr.open_dataset(path_climate_data, chunks=chunks).sortby(
-                "time"
-            )
+            self.ds_data = xr.open_dataset(path_climate_data, chunks=chunks).sortby("time")
+
+        # if chunks is not None:
+        #     self.ds_data = self.ds_data.chunk(chunks=chunks)
 
         if path_climate_data_historical is not None:
             self.ds_data = xr.concat(
@@ -132,6 +135,12 @@ class ClimateModelData:
         if reordered_coords is not None:
             self.ds_data = xr_reorder_coords(self.ds_data, reordered_coords)
 
+        if drop_leap_days:
+            self.ds_data = self.ds_data.sel(
+                time=~(
+                    (self.ds_data.time.dt.month == 2) & (self.ds_data.time.dt.day == 29)
+                )
+            )
         if load:
             self.ds_data = self.ds_data.compute()
 
@@ -168,6 +177,7 @@ class ClimateModelData:
         parametric_existing_settings: bool = False,
         running_window_mode: bool = True,
         running_window_length: int = 91,
+        print_time: bool = False,
         **kwargs,
     ) -> xr.Dataset:
         """
@@ -186,6 +196,9 @@ class ClimateModelData:
             Additional keyword arguments to pass to the bias
             correction method function.
         """
+        if print_time:
+            time_start = time.time()
+
         if bias_correction_method == "quantile_mapping":
             bc = QuantileMapping
         elif bias_correction_method == "ISIMIP":
@@ -211,8 +224,14 @@ class ClimateModelData:
             )
 
         time_res = get_time_resolution(self.ds_data)
+        time_res_ref = get_time_resolution(ds_reference)
+        if time_res != time_res_ref:
+            raise ValueError(
+                "The time resolution of the climate model data and the reference data must be the same."
+            )
+
         if time_res < pd.Timedelta(days=1):
-            hours = get_valid_hours(self.ds_data, 0)
+            hours = get_valid_hours(time_res, 0)
         else:
             hours = []
 
@@ -240,6 +259,8 @@ class ClimateModelData:
         else:
             list_ds_debiased = []
             for hour in hours:
+                if print_time:
+                    print(f"\tHour: {hour}")
                 list_ds_debiased.append(
                     get_specific_hourly_data(ds_climate_model_data_future, hour).copy(
                         data=bc.apply(
@@ -254,10 +275,12 @@ class ClimateModelData:
                         )
                     )
                 )
+                if print_time:
+                    print(f"\tHour: {hour}, Time: {(time.time() - time_start) / 60:.2f} min")
 
-            ds_climate_model_data_future_debiased = xr.concat(
-                list_ds_debiased, dim="time"
-            ).sortby("time")
+            ds_climate_model_data_future_debiased = (
+                xr.concat(list_ds_debiased, dim="time").sortby("time").to_dataset()
+            ).rename({"y": "lat", "x": "lon"})
 
         return ds_climate_model_data_future_debiased
 
@@ -270,9 +293,12 @@ class ClimateReanalysisData:
         subset_data_vars: List[str] = None,
         extent: Dict[str, float] = None,
         reordered_coords: List[str] = None,
+        drop_leap_days: bool = True,
         load: bool = True,
     ):
-        if path_reanalysis_data.is_dir():
+        if path_reanalysis_data.name.endswith(".zarr"):
+            self.ds_data = xr.open_zarr(path_reanalysis_data, chunks=chunks)
+        elif path_reanalysis_data.is_dir():
             self.ds_data = xr.open_mfdataset(
                 path_reanalysis_data.glob("*"), chunks=chunks
             ).sortby("time")
@@ -295,6 +321,13 @@ class ClimateReanalysisData:
 
         if reordered_coords is not None:
             self.ds_data = xr_reorder_coords(self.ds_data, reordered_coords)
+
+        if drop_leap_days:
+            self.ds_data = self.ds_data.sel(
+                time=~(
+                    (self.ds_data.time.dt.month == 2) & (self.ds_data.time.dt.day == 29)
+                )
+            )
 
         if load:
             self.ds_data = self.ds_data.compute()

@@ -132,3 +132,33 @@ def get_specific_hourly_data(ds: xr.Dataset, hour: int) -> xr.Dataset:
     """
 
     return ds.sel(time=ds.time.dt.hour == hour)
+
+
+def get_min_max(ds: xr.Dataset, time_resolution: str) -> xr.Dataset:
+    """
+    Calculate the minimum and maximum values of an xarray Dataset over a given time resolution.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset.
+    time_resolution : str
+        The time resolution to calculate the min and max values over.
+
+    Returns
+    -------
+    xr.Dataset
+        A new xarray Dataset containing the minimum and maximum values over the specified time resolution.
+
+    Raises
+    ------
+    ValueError
+        If time_resolution is not in the format expected by the resample function of xarray.
+    """
+    # Check if time_resolution is in the correct format
+    try:
+        pd.to_timedelta(time_resolution)
+    except ValueError:
+        raise ValueError("time_resolution must be a string in a format recognized by pandas.to_timedelta")
+
+    return ds.resample(time=time_resolution).min(), ds.resample(time=time_resolution).max()
