@@ -44,6 +44,12 @@ if __name__ == "__main__":
         help="Height to select from the reference dataset.",
     )
     parser.add_argument(
+        "--nr_processes",
+        type=int,
+        default=8,
+        help="Height to select from the reference dataset.",
+    )
+    parser.add_argument(
         "--parametric_existing_settings",
         action="store_true",
         help="Use existing parametric settings for bias correction.",
@@ -77,7 +83,7 @@ if __name__ == "__main__":
 
     # Load data
     chunks = {"time": 500, "lat": 256, "lon": 256}
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -15, "lon_max": 50}
+    # extent = {"lat_min": 30, "lat_max": 75, "lon_min": -15, "lon_max": 50}
     extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
@@ -96,8 +102,8 @@ if __name__ == "__main__":
         reanalysis_data.ds_data = reanalysis_data.ds_data.sel(height=args.height_ref)
 
     if args.variable == "pr":
-        # Convert from kg m-2 s-1 to kg m-2 (total precipitation)
-        climate_data.ds_data = climate_data.ds_data * 60 * 60 * 24
+        # Convert from kg m-2 (total precipitation) to kg m-2 s-1 (precipitation rate)
+        reanalysis_data.ds_data = reanalysis_data.ds_data / (60 * 60 * 24)
 
     # Perform bias correction
     ds_bias_corrected = climate_data.bias_correction(
@@ -111,18 +117,14 @@ if __name__ == "__main__":
         running_window_length=91,
         print_time=True,
         parallel=True,
-        nr_processes=8
+        nr_processes=args.nr_processes
     )
-
-    if args.variable == "pr":
-        # Convert back to kg m-2 s-1
-        ds_bias_corrected = ds_bias_corrected / 60 / 60 / 24
 
     # Save the bias-corrected data
     target_chunks = {
         "time": 365 if args.temp_res == "day" else 500,
-        "y": 256,
-        "x": 256,
+        "lat": 256,
+        "lon": 256,
     }
 
     zarr_encoding = {

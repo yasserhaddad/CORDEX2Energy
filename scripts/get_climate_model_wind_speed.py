@@ -63,6 +63,11 @@ def convert_cordex_wind_components_to_speed(
                 )
             }
         ).rename({f"ua{height}m": f"wind{height}m"})
+        ds_wind[f"wind{height}m"].attrs.update({
+            "long_name": "Wind speed",
+            "standard_name": "wind_speed",
+            "units": "degrees_east"
+        })
 
         # Save the wind speed data
         filename = u_file.name.replace(f"ua{height}m", f"wind{height}m")

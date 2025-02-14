@@ -17,7 +17,7 @@ def get_paths_cerra_data(
     path_data_processed: Path,
     variable: str,
 ) -> Path:
-    if variable == "ssrd" or variable == "tp" or variable == "skt":
+    if variable == "ssrd" or variable == "skt":
         cerra_path = path_data_cerra_land / "original" / variable
     elif variable == "q":
         cerra_path = path_data_processed / "cerra_processed" / variable

@@ -46,10 +46,13 @@ if __name__ == "__main__":
     path_data_processed = Path(paths["path_data_processed"])
     path_data_cordex = Path(paths["path_data_cordex"])
     path_data_adjusted_cordex = Path(paths["path_data_adjusted_cordex"])
+    path_data_personal_cordex = Path(paths["path_data_personal"]) / "cordex" / "EUR-11"
 
     time_start = time()
     cordex_tas, cordex_tas_hist = get_raw_cordex_data_paths(
-        path_data_cordex,
+        path_data_personal_cordex
+        if args.variable.startswith("wind")
+        else path_data_cordex,
         args.climate_model_chain,
         args.climate_scenario,
         args.variable,
@@ -101,6 +104,12 @@ if __name__ == "__main__":
         extent=extent,
         load=False,
     )
+
+    if args.variable.startswith("wind"):
+        climate_data.ds_data[args.variable].attrs.update({
+            "long_name": "Wind speed",
+            "standard_name": "wind_speed",
+        })
 
     output_path = (
         path_data_processed

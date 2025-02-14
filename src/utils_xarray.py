@@ -65,7 +65,7 @@ def get_time_resolution(ds, time_dim="time"):
     ValueError
         If the dataset does not contain the specified time dimension or if there are not enough time points to determine the resolution.
     """
-    if time_dim not in ds:
+    if time_dim not in ds.coords:
         raise ValueError(f"Dataset does not contain the time dimension '{time_dim}'")
 
     time_values = ds[time_dim].values  # Extract time values as numpy datetime array
@@ -132,6 +132,45 @@ def get_specific_hourly_data(ds: xr.Dataset, hour: int) -> xr.Dataset:
     """
 
     return ds.sel(time=ds.time.dt.hour == hour)
+
+
+def match_time_steps(ds_data: xr.Dataset, ds_reference: xr.Dataset, time_res: str, skip_leap_days: bool = True) -> xr.Dataset:
+    """
+    Adjust the time steps of the reference dataset to match the time steps of the data dataset.
+
+    Parameters
+    ----------
+    ds_data : xr.Dataset
+        The dataset containing the desired time steps.
+    ds_reference : xr.Dataset
+        The reference dataset to be adjusted.
+    time_res : str
+        The time resolution to use for adjusting the time steps.
+
+    Returns
+    -------
+    xr.Dataset
+        The reference dataset with adjusted time steps.
+    """
+    if not np.array_equal(np.unique(ds_data.time.dt.hour), np.unique(ds_reference.time.dt.hour)):
+        print("Adjusting time steps of the reference dataset")
+        original_length = len(ds_reference.time)
+        first_time_step = pd.to_datetime(ds_data.time.values[0])
+        start_date = pd.to_datetime(ds_reference.time.values[0]).replace(
+            hour=first_time_step.hour, minute=first_time_step.minute
+        )
+        if skip_leap_days:
+            new_time = []
+            current_date = start_date
+            while len(new_time) < original_length:
+                if not (current_date.month == 2 and current_date.day == 29):
+                    new_time.append(current_date)
+                current_date += pd.to_timedelta(time_res)
+        else:
+            new_time = pd.date_range(start=start_date, periods=original_length, freq=time_res)
+        ds_reference = ds_reference.assign_coords(time=new_time)
+
+    return ds_reference
 
 
 def get_min_max(ds: xr.Dataset, time_resolution: str) -> xr.Dataset:
