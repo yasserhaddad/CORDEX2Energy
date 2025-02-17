@@ -47,8 +47,18 @@ def extract_adjusted_timesteps(
             {climate_scenario} not found in mapping file"""
         )
 
+    year_list = mapping["year_list"].item()
+    start_year = mapping["start_year"].item()
+
+    if "mode" in mapping.columns:
+        if mapping["mode"].item() == "original":
+            if mapping["start_year"].item() > 1991:
+                start_year = 1991
+                missing_years = list(range(1991, mapping["start_year"].item()))
+                year_list = missing_years + year_list
+
     timesteps = None
-    for y in mapping.year_list.item():
+    for y in year_list:
         r = pd.date_range(f"01-01-{y} 00:00", f"12-31-{y} 00:00", freq="D")
         if timesteps is None:
             timesteps = r
@@ -56,7 +66,7 @@ def extract_adjusted_timesteps(
             timesteps = timesteps.union(r)
     adjusted_timesteps = {
         "original_timesteps": timesteps,
-        "start_year": mapping.start_year.item(),
+        "start_year": start_year,
     }
 
     return adjusted_timesteps
@@ -125,10 +135,10 @@ def timedelta_to_freq(timedelta: Union[pd.Timedelta, datetime.timedelta]) -> str
         return f"{hours}H"
     elif seconds >= 60:  # Minutes
         minutes = seconds // 60
-        return f"{minutes}T"
+        return f"{minutes}min"
     elif seconds > 0:  # Seconds
-        return f"{seconds}S"
+        return f"{seconds}s"
     elif microseconds > 0:  # Microseconds
-        return f"{microseconds}U"
+        return f"{microseconds}us"
     else:
         raise ValueError("Cannot determine frequency for zero timedelta.")

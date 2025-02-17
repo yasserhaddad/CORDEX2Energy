@@ -1,8 +1,8 @@
 #!/bin/bash
 # Define the arguments
 paths_file="../paths.json"
-# variables=("2t" "tp" "ssrd" "ws" "10si" "q" "2r" "skt" "sp")
-variables=("q")
+variables=("2t" "tp" "ssrd" "ws" "q" "2r" "sp")
+# variables=("10si")
 
 # Loop through each variable and run the script
 for variable in "${variables[@]}"; do

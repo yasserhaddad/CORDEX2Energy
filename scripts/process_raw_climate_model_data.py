@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     output_path.mkdir(parents=True, exist_ok=True)
 
-    target_chunks = {"time": 500, "lat": 256, "lon": 256}
+    target_chunks = {"time": -1, "lat": 20, "lon": 20}
 
     zarr_encoding = {
         var: {
@@ -130,6 +130,10 @@ if __name__ == "__main__":
         }
         for var in climate_data.ds_data.data_vars
     }
+
+    if (output_path / f"{args.variable}.zarr").exists():
+        shutil.rmtree(output_path / f"{args.variable}.zarr")
+
     climate_data.ds_data.chunk(target_chunks).to_zarr(
         output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
     )

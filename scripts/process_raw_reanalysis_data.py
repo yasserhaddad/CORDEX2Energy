@@ -17,7 +17,7 @@ def get_paths_cerra_data(
     path_data_processed: Path,
     variable: str,
 ) -> Path:
-    if variable == "ssrd" or variable == "skt":
+    if variable == "ssrd" or variable == "skt" or variable == "tp":
         cerra_path = path_data_cerra_land / "original" / variable
     elif variable == "q":
         cerra_path = path_data_processed / "cerra_processed" / variable
@@ -73,7 +73,7 @@ if __name__ == "__main__":
 
     output_path.mkdir(parents=True, exist_ok=True)
 
-    target_chunks = {"time": 500, "lat": 256, "lon": 256}
+    target_chunks = {"time": -1, "lat": 20, "lon": 20}
     zarr_encoding = {
         var: {
             "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
@@ -81,6 +81,10 @@ if __name__ == "__main__":
         }
         for var in reanalysis_data.ds_data.data_vars
     }
+
+    if (output_path / f"{args.variable}.zarr").exists():
+        shutil.rmtree(output_path / f"{args.variable}.zarr")
+
     reanalysis_data.ds_data.chunk(target_chunks).to_zarr(
         output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
     )

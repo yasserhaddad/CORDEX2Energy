@@ -1,21 +1,60 @@
 #!/bin/bash
 # Define the arguments
+ulimit -Sv 419430400  # Soft limit: 400GB
+ulimit -Hv 524288000  # Hard limit: 500GB
+
 paths_file="../paths_so4.json"
 model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 scenario="rcp85"
 temp_res="3hr"
 
 # Run on exo
-variables=("tas" "hurs" "huss")
-variables_ref=("2t" "2r" "q")
-temp_res_array=("3hr" "3hr" "3hr")
-height_ref_array=(2 2 2)
+# variables=("tas" "hurs" "huss")
+# variables_ref=("2t" "2r" "q")
+# temp_res_array=("3hr" "3hr" "3hr")
+# height_ref_array=(2 2 2)
 
 # Run on so4
-variables=("pr" "rsds" "psl")
-variables_ref=("tp" "ssrd" "sp")
-temp_res_array=("day" "3hr" "3hr")
-height_ref_array=("None" "None" "None")
+# variables=("pr" "rsds" "psl")
+# variables_ref=("tp" "ssrd" "sp")
+# temp_res_array=("day" "3hr" "3hr")
+# height_ref_array=("None" "None" "None")
+
+# Run on exo
+variables=("tas")
+variables_ref=("2t")
+temp_res_array=("3hr")
+height_ref_array=(2)
+nr_processes=20
+
+# Run on so4
+# variables=("pr")
+# variables_ref=("tp")
+# temp_res_array=("day")
+# height_ref_array=("None")
+# nr_processes=20
+
+# Run on iacdipl-7
+# variables=("hurs")
+# variables_ref=("2r")
+# temp_res_array=("3hr")
+# height_ref_array=(2)
+# nr_processes=30
+
+# Run on iacdipl-8
+# variables=("huss")
+# variables_ref=("q")
+# temp_res_array=("3hr")
+# height_ref_array=(2)
+# nr_processes=30
+
+# Run on iacdipl-8
+variables=("rsds")
+variables_ref=("ssrd")
+temp_res_array=("3hr")
+height_ref_array=("None")
+nr_processes=20
+
 
 for i in "${!variables[@]}"; do
     variable="${variables[$i]}"
@@ -35,7 +74,7 @@ for i in "${!variables[@]}"; do
             "$variable_ref" \
             "quantile_mapping" \
             --default_parameters \
-            --nr_processes 20
+            --nr_processes ${nr_processes}
     else
         nice -n 10 python -u bias_correct_climate_model_data_xclim.py \
             "$paths_file" \
@@ -47,7 +86,6 @@ for i in "${!variables[@]}"; do
             "quantile_mapping" \
             --height_ref "$height_ref" \
             --default_parameters \
-            --nr_processes 20
+            --nr_processes ${nr_processes}
     fi
-done
 done

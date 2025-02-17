@@ -4,12 +4,13 @@ sys.path.append("..")
 
 from src.load_data import ClimateModelData, ClimateReanalysisData
 from src.constants import COMPRESSED_ZARR_ENCODING
+from src.utils_xarray import get_time_resolution
 
 import time
 import json
 import shutil
 import argparse
-import xarray as xr
+import numpy as np
 from pathlib import Path
 
 if __name__ == "__main__":
@@ -74,15 +75,14 @@ if __name__ == "__main__":
     output_bias_corrected_cordex_var_path.mkdir(parents=True, exist_ok=True)
 
     # Load data
-    # chunks = {"time": 500, "lat": 256, "lon": 256}
     # chunks = {"time": -1}
-    chunks = {"time": -1, "lat": 60, "lon": 60}
+    chunks = {"time": -1, "lat": 20, "lon": 20}
     extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
         chunks=chunks,
         extent=extent,
-        load=False
+        load=False,
     )
     reanalysis_data = ClimateReanalysisData(
         regridded_cerra_var_path / f"{args.variable_ref}.zarr",
@@ -92,15 +92,32 @@ if __name__ == "__main__":
     )
 
     if args.height_ref is not None:
-        reanalysis_data.ds_data = reanalysis_data.ds_data.sel(height=args.height_ref)
-        climate_data.ds_data = climate_data.ds_data.drop_var("height")
+        reanalysis_data.ds_data = reanalysis_data.ds_data.sel(
+            height=args.height_ref
+        ).drop_vars("height")
+        if (
+            "height" in climate_data.ds_data.data_vars
+            and "height" not in climate_data.ds_data[args.variable].dims
+        ):
+            climate_data.ds_data = climate_data.ds_data.drop_vars("height")
 
     if args.variable == "pr":
         if climate_data.ds_data[args.variable].units == "kg m-2 s-1":
             climate_data.ds_data = climate_data.ds_data * 86400
-            climate_data.ds_data[args.variable].attrs.update({"units": "mm d-1"})
+            climate_data.ds_data[args.variable].attrs["units"] = "mm d-1"
         if reanalysis_data.ds_data[args.variable_ref].units == "kg m**-2":
-            reanalysis_data.ds_data[args.variable_ref].attrs.update({"units": "mm d-1"})
+            reanalysis_data.ds_data[args.variable_ref].attrs["units"] = "mm d-1"
+
+    if args.variable == "rsds":
+        if reanalysis_data.ds_data[args.variable_ref].units == "J m**-2":
+            time_res = get_time_resolution(reanalysis_data.ds_data).total_seconds() / 3600
+            reanalysis_data.ds_data = reanalysis_data.ds_data / (3600 * time_res)
+            reanalysis_data.ds_data[args.variable_ref].attrs["units"] = "W m**-2"
+
+        mask_ssrd_land = ~np.isnan(reanalysis_data.ds_data[args.variable_ref].isel(time=0))
+        climate_data.ds_data = climate_data.ds_data.where(mask_ssrd_land).fillna(-10)
+        reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(-10)
+
 
     # Perform bias correction
     ds_bias_corrected = climate_data.bias_correction_xclim(
@@ -113,8 +130,15 @@ if __name__ == "__main__":
         default_parameters=args.default_parameters,
         print_time=True,
         load_data=False,
-        nr_processes=args.nr_processes
+        nr_processes=args.nr_processes,
     )
+
+    # Limit relative humidity to [0, 100]
+    if args.variable == "hurs":
+        ds_bias_corrected = ds_bias_corrected.clip(0, 100)
+
+    if args.variable == "rsds":
+        ds_bias_corrected = ds_bias_corrected.where(ds_bias_corrected > 0)
 
     # Save the bias-corrected data
     target_chunks = {

@@ -96,6 +96,8 @@ class ClimateModelData:
                 "time"
             )
 
+        self.drop_leap_days = drop_leap_days
+
         if path_climate_data_historical is not None:
             self.ds_data = xr.concat(
                 [
@@ -133,7 +135,7 @@ class ClimateModelData:
                     (self.ds_data.time.dt.month == 2) & (self.ds_data.time.dt.day == 29)
                 )
             )
-            self.drop_leap_days = True
+
         if load:
             self.ds_data = self.ds_data.compute()
 
@@ -307,6 +309,7 @@ class ClimateModelData:
         load_data: bool = True,
         nr_processes: bool = 10,
         print_time: bool = False,
+        output_path: Path = None,
         **kwargs,
     ) -> xr.Dataset:
         if nr_processes > 1:
@@ -349,27 +352,33 @@ class ClimateModelData:
             data_var
         ]
 
-        if load_data:
-            da_reference_data = da_reference_data.load()
-            da_climate_model_data_past = da_climate_model_data_past.load()
-            da_climate_model_data_future = da_climate_model_data_future.load()
-
         param_var = "sfcWind" if data_var.startswith("wind") else data_var
         params = (
             DICT_DEFAULT_XCLIM_PARAMETERS[param_var] if default_parameters else kwargs
         )
+
+
         # Perform bias correction for each hour of the day if sub-daily data, otherwise for the whole day
         if len(hours) < 1:
             with ProgressBar(dt=10):
-                ds_climate_model_data_future_debiased = da_climate_model_data_future.copy(
-                    data=bc(
-                        da_climate_model_data_past,
-                        da_climate_model_data_future,
-                        da_reference_data,
-                        window_length=running_window_length,
-                        **params,
-                    ).compute().transpose("time", "lat", "lon")
-                ).to_dataset()
+                if load_data:
+                    da_reference_data = da_reference_data.load()
+                    da_climate_model_data_past = da_climate_model_data_past.load()
+                    da_climate_model_data_future = da_climate_model_data_future.load()
+
+                ds_climate_model_data_future_debiased = (
+                    da_climate_model_data_future.copy(
+                        data=bc(
+                            da_climate_model_data_past,
+                            da_climate_model_data_future,
+                            da_reference_data,
+                            window_length=running_window_length,
+                            **params,
+                        )
+                        .compute()
+                        .transpose("time", "lat", "lon")
+                    ).to_dataset()
+                )
             if print_time:
                 print(f"\tTime: {(time.time() - time_start) / 60:.2f} min")
         else:
@@ -379,16 +388,32 @@ class ClimateModelData:
                     print(f"\tHour: {hour}")
                 with ProgressBar(dt=10):
                     list_ds_debiased.append(
-                        get_specific_hourly_data(da_climate_model_data_future, hour).copy(
+                        get_specific_hourly_data(
+                            da_climate_model_data_future, hour
+                        ).copy(
                             data=bc(
-                                get_specific_hourly_data(da_reference_data, hour),
-                                get_specific_hourly_data(da_climate_model_data_past, hour),
+                                get_specific_hourly_data(
+                                    da_climate_model_data_past, hour
+                                ).load()
+                                if load_data
+                                else get_specific_hourly_data(
+                                    da_climate_model_data_past, hour
+                                ),
                                 get_specific_hourly_data(
                                     da_climate_model_data_future, hour
+                                ).load()
+                                if load_data
+                                else get_specific_hourly_data(
+                                    da_climate_model_data_future, hour
                                 ),
+                                get_specific_hourly_data(da_reference_data, hour).load()
+                                if load_data
+                                else get_specific_hourly_data(da_reference_data, hour),
                                 window_length=running_window_length,
                                 **params,
-                            ).compute().transpose("time", "lat", "lon")
+                            )
+                            .compute()
+                            .transpose("time", "lat", "lon")
                         )
                     )
                 if print_time:
@@ -397,9 +422,7 @@ class ClimateModelData:
                     )
 
             ds_climate_model_data_future_debiased = (
-                xr.concat(list_ds_debiased, dim="time")
-                .sortby("time")
-                .to_dataset()
+                xr.concat(list_ds_debiased, dim="time").sortby("time").to_dataset()
             )
 
         return ds_climate_model_data_future_debiased
