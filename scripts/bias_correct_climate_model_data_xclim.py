@@ -5,6 +5,7 @@ sys.path.append("..")
 from src.load_data import ClimateModelData, ClimateReanalysisData
 from src.constants import COMPRESSED_ZARR_ENCODING
 from src.utils_xarray import get_time_resolution
+from src.bias_correction import BiasCorrection
 
 import time
 import json
@@ -96,7 +97,7 @@ if __name__ == "__main__":
             height=args.height_ref
         ).drop_vars("height")
         if (
-            "height" in climate_data.ds_data.data_vars
+            "height" in climate_data.ds_data.coords
             and "height" not in climate_data.ds_data[args.variable].dims
         ):
             climate_data.ds_data = climate_data.ds_data.drop_vars("height")
@@ -110,41 +111,61 @@ if __name__ == "__main__":
 
     if args.variable == "rsds":
         if reanalysis_data.ds_data[args.variable_ref].units == "J m**-2":
-            time_res = get_time_resolution(reanalysis_data.ds_data).total_seconds() / 3600
-            reanalysis_data.ds_data = reanalysis_data.ds_data / (3600 * time_res)
+            time_res = get_time_resolution(reanalysis_data.ds_data).total_seconds()
+            reanalysis_data.ds_data = reanalysis_data.ds_data / time_res
             reanalysis_data.ds_data[args.variable_ref].attrs["units"] = "W m**-2"
 
-        mask_ssrd_land = ~np.isnan(reanalysis_data.ds_data[args.variable_ref].isel(time=0))
-        climate_data.ds_data = climate_data.ds_data.where(mask_ssrd_land).fillna(-10)
-        reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(-10)
+        # mask_ssrd_land = ~np.isnan(
+        #     reanalysis_data.ds_data[args.variable_ref].isel(time=0)
+        # )
+        # climate_data.ds_data = climate_data.ds_data.where(mask_ssrd_land).fillna(-10)
+        # reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(-10)
+        # reanalysis_data.ds_data[args.variable_ref], mask_ssrd_land = (
+        #     add_values_missing_ocean(reanalysis_data.ds_data[args.variable_ref], 0, 1)
+        # )
 
+    temp_output_dir = (
+        path_data_processed
+        / "cordex_processed"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / "temp"
+        / "bias_corrected"
+        / args.variable
+    )
+    temp_output_dir.mkdir(exist_ok=True)
 
     # Perform bias correction
-    ds_bias_corrected = climate_data.bias_correction_xclim(
-        reanalysis_data.ds_data.rename({args.variable_ref: args.variable}),
-        data_var=args.variable,
+    bias_correction = BiasCorrection(
+        climate_data,
+        reanalysis_data,
         reference_period=("1991", "2017"),
         future_period=("2018", "2100"),
         bias_correction_method=args.bias_correction_method,
-        running_window_length=91,
+    )
+
+    ds_bias_corrected = bias_correction.bias_correction_xclim(
+        data_var=args.variable,
+        reference_data_var=args.variable_ref,
+        running_window_length= 91,
         default_parameters=args.default_parameters,
-        print_time=True,
-        load_data=False,
         nr_processes=args.nr_processes,
+        output_path=temp_output_dir,
+        load_data=False,
+        print_time=False,
     )
 
     # Limit relative humidity to [0, 100]
     if args.variable == "hurs":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
 
-    if args.variable == "rsds":
-        ds_bias_corrected = ds_bias_corrected.where(ds_bias_corrected > 0)
+    # if args.variable == "rsds":
+    #     ds_bias_corrected = ds_bias_corrected.where(mask_ssrd_land)
 
     # Save the bias-corrected data
     target_chunks = {
-        "time": 365 if args.temp_res == "day" else 500,
-        "lat": 256,
-        "lon": 256,
+        "time": 365 if args.temp_res == "day" else 2920,
+        "lat": 256 if args.temp_res == "day"  else 128,
+        "lon": 256 if args.temp_res == "day"  else 128,
     }
 
     zarr_encoding = {
@@ -152,7 +173,7 @@ if __name__ == "__main__":
             "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
             "chunks": tuple(target_chunks.values()),
         }
-        for var in climate_data.ds_data.data_vars
+        for var in ds_bias_corrected.data_vars
     }
 
     if (output_bias_corrected_cordex_var_path / f"{args.variable}.zarr").exists():
@@ -163,5 +184,7 @@ if __name__ == "__main__":
         mode="w",
         encoding=zarr_encoding,
     )
+
+    shutil.rmtree(temp_output_dir)
 
     print(f"\tProcessing time: {(time.time() - time_start) / 60:.2f} minutes.")

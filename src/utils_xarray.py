@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 import xarray as xr
 import numpy as np
 import pandas as pd
@@ -201,3 +201,55 @@ def get_min_max(ds: xr.Dataset, time_resolution: str) -> xr.Dataset:
         raise ValueError("time_resolution must be a string in a format recognized by pandas.to_timedelta")
 
     return ds.resample(time=time_resolution).min(), ds.resample(time=time_resolution).max()
+
+
+def add_values_missing_ocean(
+    da: xr.DataArray, lower_bound: float, higher_bound: float
+) -> Union[xr.DataArray, xr.DataArray]:
+    """
+    Add random values to missing ocean data in the given DataArray.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input data array with missing ocean values.
+    lower_bound : float
+        Lower bound for the random values to be generated.
+    higher_bound : float
+        Higher bound for the random values to be generated.
+
+    Returns
+    -------
+    Union[xr.DataArray, xr.DataArray]
+        DataArray with missing ocean values filled with random values and mask for ocean values.
+    """
+    random_values_reanalysis = xr.DataArray(
+        np.random.uniform(lower_bound, higher_bound, da.shape), dims=da.dims
+    )
+    mask_ssrd_land = ~np.isnan(da.isel(time=0))
+    return da.where(mask_ssrd_land, random_values_reanalysis), mask_ssrd_land
+
+
+def add_noise_to_constant_grid_cells(
+    da: xr.DataArray, noise_level: float
+) -> Union[xr.DataArray, xr.DataArray]:
+    """
+    Add noise to constant grid cells in the given DataArray.
+
+    Parameters
+    ----------
+    da : xr.DataArray
+        Input data array with constant grid cells.
+    noise_level : float
+        Level of noise to be added to the constant grid cells.
+
+    Returns
+    -------
+    Union[xr.DataArray, xr.DataArray]
+        DataArray with noise added to the constant grid cells and mask for constant grid cells.
+    """
+    mask_constant = da.std(dim="time") == 0
+    random_values_reanalysis = xr.DataArray(
+        np.random.randint(0, noise_level + 1, da.shape), dims=da.dims
+    )
+    return da.where(~mask_constant, da + random_values_reanalysis), mask_constant

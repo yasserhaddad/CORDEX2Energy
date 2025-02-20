@@ -83,7 +83,6 @@ if __name__ == "__main__":
 
     # Load data
     chunks = {"time": 500, "lat": 256, "lon": 256}
-    # extent = {"lat_min": 30, "lat_max": 75, "lon_min": -15, "lon_max": 50}
     extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",

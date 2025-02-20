@@ -16,7 +16,7 @@ from src.convert_climate_vars import (
     calculate_specific_humidity,
 )
 
-with open("../paths.json") as f:
+with open("../paths_so4.json") as f:
     paths = json.load(f)
 
 path_data_processed = Path(paths["path_data_processed"])
@@ -41,27 +41,26 @@ for tas_file, rh_file, pressure_file in zip(
     print(year)
     # Load the data for the current year
     chunks = {"time": -1, "y": 40, "x": 40}
-    ds_tas = xr.open_dataset(tas_file, chunks=chunks).sortby("time")
-    ds_rh = xr.open_dataset(rh_file, chunks=chunks).sortby("time")
-    ds_pressure = xr.open_dataset(pressure_file, chunks=chunks).sortby("time")
+    ds_tas = xr.open_dataset(tas_file).sortby("time")
+    ds_rh = xr.open_dataset(rh_file).sortby("time")
+    ds_pressure = xr.open_dataset(pressure_file).sortby("time")
 
     if ds_tas["2t"].attrs["units"] == "K":
         ds_tas["2t"] -= 273.15
 
-    with ProgressBar(dt=60):
-        # Calculate specific humidity
-        ds_sh = ds_tas.copy(
-            {
-                "2t": calculate_specific_humidity(
-                    ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"]
-                ).compute()
-            }
-        ).rename({"2t": "q"})
-        ds_sh["q"].attrs = {
-            "long_name": "Specific humidity",
-            "units": "kg kg-1",
-            "standard_name": "specific_humidity",
+    # Calculate specific humidity
+    ds_sh = ds_tas.copy(
+        {
+            "2t": calculate_specific_humidity(
+                ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"]
+            ).compute()
         }
+    ).rename({"2t": "q"})
+    ds_sh["q"].attrs = {
+        "long_name": "Specific humidity",
+        "units": "kg kg-1",
+        "standard_name": "specific_humidity",
+    }
 
     # Save the specific humidity data
     output_path = (

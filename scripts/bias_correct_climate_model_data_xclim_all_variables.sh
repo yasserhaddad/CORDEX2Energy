@@ -49,11 +49,11 @@ nr_processes=20
 # nr_processes=30
 
 # Run on iacdipl-8
-variables=("rsds")
-variables_ref=("ssrd")
-temp_res_array=("3hr")
-height_ref_array=("None")
-nr_processes=20
+# variables=("rsds")
+# variables_ref=("ssrd")
+# temp_res_array=("3hr")
+# height_ref_array=("None")
+# nr_processes=20
 
 
 for i in "${!variables[@]}"; do

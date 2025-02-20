@@ -62,6 +62,6 @@ def calculate_specific_humidity(
         temperature,
         relative_humidity,
         surface_pressure,
-        dask="parallelized",
+        # dask="parallelized",
         output_dtypes=[np.float32],
     )
