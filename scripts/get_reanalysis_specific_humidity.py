@@ -1,11 +1,6 @@
 import sys
 
-import dask.config
-
 sys.path.append("..")
-
-import dask
-from dask.diagnostics import ProgressBar
 
 import time
 import json
@@ -15,6 +10,7 @@ from pathlib import Path
 from src.convert_climate_vars import (
     calculate_specific_humidity,
 )
+from src.cdo_commands import cdo_setgrid
 
 with open("../paths_so4.json") as f:
     paths = json.load(f)
@@ -30,6 +26,7 @@ relative_humidity_cerra_path = sorted(
     (path_data_cerra / "original" / "2r").glob("*.nc")
 )
 pressure_cerra_path = sorted((path_data_cerra / "original" / "sp").glob("*.nc"))
+grid_path = path_data_processed / "climate_grids" / "grid_cerra_griddes.txt"
 
 t_start = time.time()
 print("Calculating specific humidity")
@@ -48,14 +45,21 @@ for tas_file, rh_file, pressure_file in zip(
     if ds_tas["2t"].attrs["units"] == "K":
         ds_tas["2t"] -= 273.15
 
+    if ds_pressure["sp"].attrs["units"] == "Pa":
+        ds_pressure["sp"] /= 100
+
     # Calculate specific humidity
-    ds_sh = ds_tas.copy(
+    specific_humidity = calculate_specific_humidity(
+        ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"]
+    ).compute()
+
+    # Create a new dataset for specific humidity
+    ds_sh = xr.Dataset(
         {
-            "2t": calculate_specific_humidity(
-                ds_tas["2t"], ds_rh["2r"], ds_pressure["sp"]
-            ).compute()
-        }
-    ).rename({"2t": "q"})
+            "q": specific_humidity
+        },
+        coords=ds_tas.coords,
+    )
     ds_sh["q"].attrs = {
         "long_name": "Specific humidity",
         "units": "kg kg-1",
@@ -66,5 +70,11 @@ for tas_file, rh_file, pressure_file in zip(
     output_path = (
         path_data_processed / "cerra_processed" / "q" / f"q_3hr_cerra_{year}.nc"
     )
-    ds_sh.to_netcdf(output_path)
+    temp_output_path = output_path.with_name(f"temp_{output_path.name}")
+    ds_sh.to_netcdf(temp_output_path)
+
+    # Set the grid of the output file
+    cdo_setgrid(temp_output_path, grid_path, output_path)
+    temp_output_path.unlink()
+
     print(f"\tProcessing time: {(time.time() - t_start) / 60:.2f} minutes.")

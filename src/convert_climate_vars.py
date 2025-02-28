@@ -41,7 +41,7 @@ def calculate_specific_humidity(
     temperature : xr.DataArray
         The temperature in degrees Celsius.
     relative_humidity : xr.DataArray
-        The relative humidity as a fraction (0 to 1).
+        The relative humidity as a percentage (0 to 100)
     surface_pressure : xr.DataArray
         The surface pressure in hPa.
 
@@ -52,16 +52,20 @@ def calculate_specific_humidity(
     """
 
     def specific_humidity_func(temp, rh, sp):
-        # Calculate saturation vapor pressure (e_s) using the Clausius-Clapeyron equation
+        # Calculate saturation vapor pressure (e_s) using the Clausius-Clapeyron equation (Bolton's approximation)
         e_s = 6.112 * np.exp((17.67 * temp) / (temp + 243.5))
-        # Calculate specific humidity (q)
-        return (rh * e_s) / (sp - (1 - rh) * e_s)
+        # Compute actual vapor pressure (e) from relative humidity and saturation vapor pressure
+        e = rh * e_s / 100
+        # Calculate specific humidity (q) from actual vapor pressure and surface pressure
+        q = 0.622 * (e / sp)
+        # q = 0.622 * e / (sp - (1 - 0.622) * e)
+
+        return q
 
     return xr.apply_ufunc(
         specific_humidity_func,
         temperature,
         relative_humidity,
         surface_pressure,
-        # dask="parallelized",
         output_dtypes=[np.float32],
     )

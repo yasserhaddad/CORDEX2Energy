@@ -7,7 +7,8 @@ from pathlib import Path
 import argparse
 from time import time
 from src.constants import COMPRESSED_ZARR_ENCODING
-from src.load_data import ClimateReanalysisData, cdo_remap
+from src.load_data import ClimateReanalysisData
+from src.cdo_commands import cdo_remap
 import shutil
 
 
@@ -24,6 +25,7 @@ def get_paths_cerra_data(
     else:
         cerra_path = path_data_cerra / "original" / variable
     return cerra_path
+
 
 
 if __name__ == "__main__":

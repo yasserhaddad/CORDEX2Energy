@@ -1,11 +1,13 @@
 #!/bin/bash
 # Define the arguments
-paths_file="../paths.json"
+paths_file="../paths_so4.json"
 model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 scenario="rcp85"
 # variables=("tas" "huss" "hurs" "rsds" "sfcWind" "psl" "wind100m" "wind150m" "wind200m")
 # temp_res="3hr"
-variables=("pr")
+# variables=("pr")
+# temp_res="day"
+variables=("mrro")
 temp_res="day"
 
 # Loop through each variable and run the script

@@ -1,22 +1,33 @@
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import List, Tuple
-import dask
-from dask.diagnostics import ProgressBar
-import xarray as xr
-import pandas as pd
 
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import xarray as xr
+from dask.distributed import Client
+from dask.diagnostics import ProgressBar
+
+from .bias_correction_xclim import (
+    DICT_DEFAULT_XCLIM_PARAMETERS,
+    empirical_quantile_mapping,
+)
 from .load_data import ClimateModelData, ClimateReanalysisData
 from .utils_xarray import (
-    get_time_resolution,
     get_specific_hourly_data,
+    get_time_resolution,
     get_valid_hours,
     match_time_steps,
 )
-from .bias_correction_xclim import (
-    empirical_quantile_mapping,
-    DICT_DEFAULT_XCLIM_PARAMETERS,
-)
+from .metrics import compute_trend_statsmodel
+
+sns.set_style("whitegrid", {"grid.color": ".93"})
+
+# Define a color-blind friendly palette
+COLORBLIND_PALETTE = sns.color_palette("colorblind")
+sns.set_palette(COLORBLIND_PALETTE)
 
 
 class BiasCorrection:
@@ -27,12 +38,14 @@ class BiasCorrection:
         reference_period: Tuple[str, str],
         future_period: Tuple[str, str],
         bias_correction_method: str,
+        client: Client = None,
     ):
         self.climate_data = climate_data
         self.reanalysis_data = reanalysis_data
         self.reference_period = reference_period
         self.future_period = future_period
         self.bias_correction_method = bias_correction_method
+        self.client = client
 
     def load_and_preprocess_data(
         self, data_var: str, reference_data_var: str
@@ -105,6 +118,53 @@ class BiasCorrection:
             hours,
         )
 
+    def update_attributes(
+        self, ds_bias_corrected: xr.Dataset, data_var: str
+    ) -> xr.Dataset:
+        """
+        Update the attributes of the bias-corrected dataset with additional metadata.
+
+        Parameters
+        ----------
+        ds_bias_corrected : xr.Dataset
+            The bias-corrected xarray Dataset whose attributes need to be updated.
+        data_var : str
+            The name of the data variable within the dataset whose attributes are used for updating.
+
+        Returns
+        -------
+        xr.Dataset
+            The bias-corrected xarray Dataset with updated attributes.
+
+        Notes
+        -----
+        The method updates the global attributes, based on the original climata data and
+        adds the following ones:
+        - `history`: Appends the history attribute from the data variable.
+        - `bias_adjustment`: Copies the bias adjustment attribute from the data variable.
+        - `reference_period`: Sets the reference period based on the instance's reference period.
+        - `future_period`: Sets the future period based on the instance's future period.
+        """
+
+        new_attrs = self.climate_data.ds_data.attrs
+        if "history" in new_attrs:
+            new_attrs["history"] += f" | {ds_bias_corrected[data_var].attrs['history']}"
+        else:
+            new_attrs["history"] = ds_bias_corrected[data_var].attrs["history"]
+
+        new_attrs["bias_adjustment"] = ds_bias_corrected[data_var].attrs[
+            "bias_adjustment"
+        ]
+        new_attrs["reference_period"] = (
+            f"{self.reference_period[0]} - {self.reference_period[1]}"
+        )
+        new_attrs["future_period"] = (
+            f"{self.future_period[0]} - {self.future_period[1]}"
+        )
+        ds_bias_corrected = ds_bias_corrected.assign_attrs(new_attrs)
+
+        return ds_bias_corrected
+
     def perform_bias_correction(
         self,
         bc: callable,
@@ -145,8 +205,8 @@ class BiasCorrection:
             da_climate_model_data_past = da_climate_model_data_past.load()
             da_climate_model_data_future = da_climate_model_data_future.load()
 
-        debiased_data = da_climate_model_data_future.copy(
-            data=bc(
+        debiased_data = self.update_attributes(
+            bc(
                 da_climate_model_data_past,
                 da_climate_model_data_future,
                 da_reference_data,
@@ -156,7 +216,10 @@ class BiasCorrection:
             )
             .compute()
             .transpose("time", "lat", "lon")
-        ).to_dataset()
+            .rename(da_climate_model_data_future.name)
+            .to_dataset(),
+            da_climate_model_data_future.name,
+        )
 
         return debiased_data
 
@@ -179,7 +242,11 @@ class BiasCorrection:
         -------
         None
         """
-        debiased_data.to_zarr(output_path / f"{data_var}_hour_{hour}.zarr", mode="w")
+        if self.client is not None:
+            debiased_data = self.client.scatter(debiased_data, broadcast=True)
+        debiased_data.chunk({"time": -1, "lat": 20, "lon": 20}).to_zarr(
+            output_path / f"{data_var}_hour_{hour}.zarr", mode="w"
+        )
 
     def concatenate_saved_data(self, output_path, data_var, hours):
         """
@@ -213,7 +280,6 @@ class BiasCorrection:
         running_window_length: int = 91,
         default_parameters: bool = True,
         load_data: bool = False,
-        nr_processes: int = 10,
         print_time: bool = False,
         output_path: Path = None,
         **kwargs,
@@ -252,9 +318,6 @@ class BiasCorrection:
         ValueError
             If the specified bias correction method is not supported.
         """
-        if nr_processes > 1:
-            dask.config.set(num_workers=nr_processes, scheduler="processes")
-
         if print_time:
             time_start = time.time()
 
@@ -281,6 +344,9 @@ class BiasCorrection:
             if print_time:
                 print(f"\tHour: {hour}")
 
+            if (output_path / f"{data_var}_hour_{hour}.zarr").exists():
+                return
+
             da_reference_data_hourly = get_specific_hourly_data(da_reference_data, hour)
             da_climate_model_data_past_hourly = get_specific_hourly_data(
                 da_climate_model_data_past, hour
@@ -303,6 +369,9 @@ class BiasCorrection:
                 **params,
             )
 
+            if print_time:
+                print(f"\tTime: {(time.time() - time_start) / 60:.2f} min")
+
             if "jitter_under_thresh_value" in params and mask_constant_future.any():
                 debiased_data = debiased_data.where(
                     ~mask_constant_future,
@@ -310,6 +379,7 @@ class BiasCorrection:
                 )
 
             self.save_debiased_data(debiased_data, output_path, data_var, hour)
+            del debiased_data
 
         if len(hours) < 1:
             with ProgressBar(dt=60):
@@ -339,3 +409,436 @@ class BiasCorrection:
             )
 
         return ds_climate_model_data_future_debiased
+
+
+class BiasCorrectionValidation:
+    def __init__(
+        self,
+        reference_period: Tuple[str, str],
+        future_period: Tuple[str, str],
+    ):
+        self.reference_period = reference_period
+        self.future_period = future_period
+
+    def preprocess_data(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        period: str = None,
+    ) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+        """
+        Preprocess climate model and reanalysis data by selecting specific periods and/or hours.
+        Parameters
+        ----------
+        da_climate_model_data : xr.DataArray
+            The climate model data array.
+        da_climate_model_data_bc : xr.DataArray
+            The bias-corrected climate model data array.
+        da_reanalysis_data : xr.DataArray
+            The reanalysis data array.
+        hour : int, optional
+            Specific hour to select from the data. If None, all hours are included.
+        period : str, optional
+            Period to select from the data. Must be either 'reference' or 'future'. If None, all periods are included.
+        Returns
+        -------
+        Tuple[xr.DataArray, xr.DataArray, xr.DataArray]
+            A tuple containing the preprocessed climate model data, bias-corrected climate model data, and reanalysis data.
+        Raises
+        ------
+        ValueError
+            If the period is not 'reference' or 'future'.
+        """
+        sel_climate_model_data = da_climate_model_data
+        sel_climate_model_data_bc = da_climate_model_data_bc
+        sel_reanalysis_data = da_reanalysis_data
+        if period is not None:
+            if period not in ["reference", "future"]:
+                raise ValueError(
+                    "Invalid period. Choose either 'reference' or 'future'."
+                )
+
+            if period == "reference":
+                sel_climate_model_data = sel_climate_model_data.sel(
+                    time=slice(*self.reference_period)
+                )
+                sel_climate_model_data_bc = sel_climate_model_data_bc.sel(
+                    time=slice(*self.reference_period)
+                )
+                sel_reanalysis_data = sel_reanalysis_data.sel(
+                    time=slice(*self.reference_period)
+                )
+            else:
+                sel_climate_model_data = sel_climate_model_data.sel(
+                    time=slice(*self.future_period)
+                )
+                sel_climate_model_data_bc = sel_climate_model_data_bc.sel(
+                    time=slice(*self.future_period)
+                )
+                sel_reanalysis_data = sel_reanalysis_data.sel(
+                    time=slice(*self.future_period)
+                )
+
+        if hour is not None:
+            sel_climate_model_data = get_specific_hourly_data(
+                sel_climate_model_data, hour
+            )
+            sel_climate_model_data_bc = get_specific_hourly_data(
+                sel_climate_model_data_bc, hour
+            )
+            sel_reanalysis_data = get_specific_hourly_data(sel_reanalysis_data, hour)
+
+        return (sel_climate_model_data, sel_climate_model_data_bc, sel_reanalysis_data)
+
+    def get_quantile(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        period: str = "reference",
+        quantiles: List[float] = [0.1, 0.9],
+    ) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+        """
+        Calculate quantiles for climate model data, bias-corrected climate model data, and reanalysis data.
+        Parameters
+        ----------
+        da_climate_model_data : xr.DataArray
+            The climate model data array.
+        da_climate_model_data_bc : xr.DataArray
+            The bias-corrected climate model data array.
+        da_reanalysis_data : xr.DataArray
+            The reanalysis data array.
+        hour : int, optional
+            The specific hour to filter the data by. If None, no filtering by hour is applied. Default is None.
+        period : str, optional
+            The period to consider for the data. Default is "reference".
+        quantiles : List[float], optional
+            A list of quantiles to calculate. Default is [0.1, 0.9].
+        Returns
+        -------
+        Tuple[xr.DataArray, xr.DataArray, xr.DataArray]
+            A tuple containing three xarray DataArrays:
+            - Quantiles of the climate model data.
+            - Quantiles of the bias-corrected climate model data.
+            - Quantiles of the reanalysis data.
+        """
+        climate_model_data, climate_model_data_bc, reanalysis_data = (
+            self.preprocess_data(
+                da_climate_model_data,
+                da_climate_model_data_bc,
+                da_reanalysis_data,
+                hour,
+                period,
+            )
+        )
+
+        climate_model_data_quantile = climate_model_data.quantile(quantiles, dim="time")
+        climate_model_data_bc_quantile = climate_model_data_bc.quantile(quantiles, dim="time")
+        reanalysis_data_quantile = reanalysis_data.quantile(quantiles, dim="time")
+
+        return (
+            climate_model_data_quantile,
+            climate_model_data_bc_quantile,
+            reanalysis_data_quantile,
+        )
+
+    def compute_mean(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        group: str = "year",
+        period: str = "reference",
+        spatial_mean: bool = False,
+    ) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
+        """
+        Compute the yearly mean of climate model data, bias-corrected climate model data, and reanalysis data.
+
+        Parameters
+        ----------
+        da_climate_model_data : xr.DataArray
+            The climate model data array.
+        da_climate_model_data_bc : xr.DataArray
+            The bias-corrected climate model data array.
+        da_reanalysis_data : xr.DataArray
+            The reanalysis data array.
+        hour : int, optional
+            The specific hour to filter the data by. If None, no filtering by hour is applied. Default is None.
+        spatial_mean : bool, optional
+            If True, compute the spatial mean over latitude and longitude. Default is False.
+
+        Returns
+        -------
+        Tuple[xr.DataArray, xr.DataArray, xr.DataArray]
+            A tuple containing:
+            - climate_model_data_mean: Mean of the climate model data grouped by year.
+            - climate_model_data_bc_mean: Mean of the bias-corrected climate model data grouped by year.
+            - reanalysis_data_mean: Mean of the reanalysis data grouped by year.
+        """
+        climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean = (
+            self.preprocess_data(
+                da_climate_model_data,
+                da_climate_model_data_bc,
+                da_reanalysis_data,
+                hour,
+                period,
+            )
+        )
+
+        if group is not None:
+            if group not in ["year", "month", "season"]:
+                raise ValueError(
+                    "Invalid group. Choose either 'year', 'month', or 'season'."
+                )
+
+            climate_model_data_mean = climate_model_data_mean.groupby(f"time.{group}")
+            climate_model_data_bc_mean = climate_model_data_bc_mean.groupby(
+                f"time.{group}"
+            )
+            reanalysis_data_mean = reanalysis_data_mean.groupby(f"time.{group}")
+
+        climate_model_data_mean = climate_model_data_mean.mean(skipna=True)
+        climate_model_data_bc_mean = climate_model_data_bc_mean.mean(skipna=True)
+        reanalysis_data_mean = reanalysis_data_mean.mean(skipna=True)
+
+        if spatial_mean:
+            climate_model_data_mean = climate_model_data_mean.mean(
+                dim=["lat", "lon"], skipna=True
+            )
+            climate_model_data_bc_mean = climate_model_data_bc_mean.mean(
+                dim=["lat", "lon"], skipna=True
+            )
+            reanalysis_data_mean = reanalysis_data_mean.mean(
+                dim=["lat", "lon"], skipna=True
+            )
+
+        return climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean
+
+    def compute_trend(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        dim: str = "year",
+        compute_mean: bool = False,
+        spatial_mean: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Compute the trend of yearly mean for climate model data, bias-corrected climate model data, and reanalysis data.
+
+        Parameters
+        ----------
+        da_climate_model_data : xr.DataArray
+            The climate model data array.
+        da_climate_model_data_bc : xr.DataArray
+            The bias-corrected climate model data array.
+        da_reanalysis_data : xr.DataArray
+            The reanalysis data array.
+        hour : int, optional
+            The specific hour to filter the data by. If None, no filtering by hour is applied. Default is None.
+        compute_mean: bool, optional
+            If True, compute mean. Default is False.
+        spatial_mean : bool, optional
+            If True, compute the spatial mean over latitude and longitude. Default is False.
+
+        Returns
+        -------
+        pd.DataFrame
+            A DataFrame containing the trends (slope and intercept of the linear regression) and confidence intervals for:
+            - Raw Climate Model Data
+            - Bias-Corrected Climate Model Data
+            - Reanalysis Data
+        """
+        if compute_mean:
+            climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean = (
+                self.compute_mean(
+                    da_climate_model_data,
+                    da_climate_model_data_bc,
+                    da_reanalysis_data,
+                    hour,
+                    period=None,
+                    spatial_mean=spatial_mean,
+                )
+            )
+        else:
+            climate_model_data_mean = da_climate_model_data
+            climate_model_data_bc_mean = da_climate_model_data_bc
+            reanalysis_data_mean = da_reanalysis_data
+
+        trends = []
+        names = ["Raw Climate Model Data", "Bias-Corrected Climate Model Data", "Reanalysis Data"]
+        for i, data in enumerate([climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean]):
+            y = data.dropna(dim=dim)
+            X = np.arange(len(y)).reshape(-1, 1)
+            coef, intercept, _, conf_interval = compute_trend_statsmodel(X, y.values)
+            trends.append(
+                {
+                    "name": names[i],
+                    "slope": coef,
+                    "intercept": intercept,
+                    "lower": conf_interval[1][0],
+                    "upper": conf_interval[1][1],
+                }
+            )
+
+        return pd.DataFrame(trends)
+
+    def compute_bias(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        mean: bool = False,
+        spatial_mean: bool = False,
+        group: str = "year",
+        period: str = "reference",
+        quantiles: List[float] = None,
+    ):
+        if quantiles is None:
+            climate_model_data, climate_model_data_bc, reanalysis_data = (
+                self.preprocess_data(
+                    da_climate_model_data,
+                    da_climate_model_data_bc,
+                    da_reanalysis_data,
+                    hour,
+                    period,
+                )
+            )
+            if mean or spatial_mean:
+                climate_model_data, climate_model_data_bc, reanalysis_data = (
+                    self.compute_mean(
+                        da_climate_model_data,
+                        da_climate_model_data_bc,
+                        da_reanalysis_data,
+                        hour,
+                        group,
+                        period,
+                        spatial_mean,
+                    )
+                )
+        else:
+            climate_model_data, climate_model_data_bc, reanalysis_data = (
+                self.get_quantile(
+                    da_climate_model_data,
+                    da_climate_model_data_bc,
+                    da_reanalysis_data,
+                    hour,
+                    period,
+                    quantiles,
+                )
+            )
+
+        bias = climate_model_data - reanalysis_data
+        bias_bc = climate_model_data_bc - reanalysis_data
+
+        return bias, bias_bc
+
+    def compute_correlation(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        group: str = "year",
+        spatial_mean: bool = False,
+    ) -> Tuple[float, float]:
+        """
+        Compute the correlation of yearly or seasonal data between raw and reanalysis, and bias-corrected and reanalysis.
+
+        Parameters
+        ----------
+        da_climate_model_data : xr.DataArray
+            The climate model data array.
+        da_climate_model_data_bc : xr.DataArray
+            The bias-corrected climate model data array.
+        da_reanalysis_data : xr.DataArray
+            The reanalysis data array.
+        hour : int, optional
+            The specific hour to filter the data by. If None, no filtering by hour is applied. Default is None.
+        group : str, optional
+            The time grouping for the correlation calculation. Must be either 'year' or 'season'. Default is 'year'.
+        spatial_mean : bool, optional
+            If True, compute the spatial mean over latitude and longitude. Default is False.
+
+        Returns
+        -------
+        Tuple[float, float]
+            A tuple containing the correlation coefficients for:
+            - Raw climate model data and reanalysis data.
+            - Bias-corrected climate model data and reanalysis data.
+        """
+        climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean = (
+            self.compute_mean(
+                da_climate_model_data,
+                da_climate_model_data_bc,
+                da_reanalysis_data,
+                hour,
+                group,
+                period="reference",
+                spatial_mean=spatial_mean,
+            )
+        )
+
+        correlation_raw = xr.corr(climate_model_data_mean, reanalysis_data_mean, dim="time")
+        correlation_bc = xr.corr(climate_model_data_bc_mean, reanalysis_data_mean, dim="time")
+
+        return correlation_raw.item(), correlation_bc.item()
+
+    def plot_annual_mean(
+        self,
+        da_climate_model_data: xr.DataArray,
+        da_climate_model_data_bc: xr.DataArray,
+        da_reanalysis_data: xr.DataArray,
+        hour: int = None,
+        spatial_mean: bool = False,
+        ax: plt.Axes = None,
+        title: str = None,
+        save: bool = False,
+        output_filename: str = None,
+        file_format: str = "pdf",
+        **kwargs_plot,
+    ):
+        if ax is None:
+            _, ax = plt.subplots(**kwargs_plot)
+
+        climate_model_data_mean, climate_model_data_bc_mean, reanalysis_data_mean = (
+            self.compute_mean(
+                da_climate_model_data,
+                da_climate_model_data_bc,
+                da_reanalysis_data,
+                hour,
+                spatial_mean,
+            )
+        )
+
+        climate_model_data_mean = climate_model_data_mean.compute()
+        climate_model_data_bc_mean = climate_model_data_bc_mean.compute()
+        reanalysis_data_mean = reanalysis_data_mean.compute()
+
+        climate_model_data_mean.plot(
+            ax=ax, label="Climate Model Data", linestyle="-", linewidth=2
+        )
+        climate_model_data_bc_mean.plot(
+            ax=ax,
+            label="Bias-Corrected Climate Model Data",
+            linestyle="--",
+            linewidth=2,
+        )
+        reanalysis_data_mean.plot(
+            ax=ax, label="Reanalysis Data", linestyle=":", linewidth=2
+        )
+        # Customize the plot
+        ax.set_xlabel("Year")
+        ax.set_ylabel(da_climate_model_data.name)
+        ax.legend()
+
+        if title is not None:
+            ax.set_title(title)
+        if ax is None:
+            plt.show()

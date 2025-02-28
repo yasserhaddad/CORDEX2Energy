@@ -10,7 +10,8 @@ import pandas as pd
 from pathlib import Path
 from time import time
 from src.constants import COMPRESSED_ZARR_ENCODING
-from src.load_data import ClimateModelData, cdo_remap
+from src.load_data import ClimateModelData
+from src.cdo_commands import cdo_remap
 from src.timesteps_adjustments import extract_adjusted_timesteps
 from src.utils_load_data import get_raw_cordex_data_paths
 

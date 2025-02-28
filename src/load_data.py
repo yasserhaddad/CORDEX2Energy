@@ -10,55 +10,6 @@ from .utils_xarray import (
     xr_reorder_coords
 )
 
-import subprocess
-
-REMAP_TYPE_MAP = {
-    "conservative": "remapcon",
-    "bilinear": "remapbil",
-    "bicubic": "remapbic",
-    "nearest_neighbor": "remapnn",
-    "distance_weighted": "remapdis",
-}
-
-
-def cdo_remap(
-    input_file_path: str, output_file_path: str, remap_type: str, target_grid_path: str
-) -> None:
-    """
-    Remap the input file to the target grid using CDO.
-
-    Parameters
-    ----------
-    input_file_path : str
-        The path to the input file.
-    output_file_path : str
-        The path to the output file.
-    remap_type : str
-        The type of remapping to perform. Supported types are:
-        - 'conservative'
-        - 'bilinear'
-        - 'bicubic'
-        - 'nearest_neighbor'
-        - 'distance_weighted'
-    target_grid_path : str
-        The path to the target grid file.
-    """
-    # Get the CDO remap command
-    cdo_remap_command = REMAP_TYPE_MAP.get(remap_type.lower())
-    if cdo_remap_command is None:
-        raise ValueError(f"Unsupported remap type: {remap_type}")
-
-    # Construct the CDO command
-    cdo_command = [
-        "cdo",
-        f"{cdo_remap_command},{target_grid_path}",
-        input_file_path,
-        output_file_path,
-    ]
-
-    # Execute the CDO command
-    subprocess.run(cdo_command, check=True)
-
 
 class ClimateModelData:
     def __init__(
@@ -77,7 +28,7 @@ class ClimateModelData:
             self.ds_data = xr.open_zarr(path_climate_data, chunks=chunks)
         elif path_climate_data.is_dir():
             self.ds_data = xr.open_mfdataset(
-                path_climate_data.glob("*"), chunks=chunks
+                sorted(path_climate_data.glob("*")), chunks=chunks, combine_attrs="override"
             ).sortby("time")
         else:
             self.ds_data = xr.open_dataset(path_climate_data, chunks=chunks).sortby(
@@ -160,7 +111,7 @@ class ClimateReanalysisData:
         extent: Dict[str, float] = None,
         reordered_coords: List[str] = None,
         drop_leap_days: bool = True,
-        load: bool = True,
+        load: bool = False,
     ):
         if path_reanalysis_data.name.endswith(".zarr"):
             self.ds_data = xr.open_zarr(path_reanalysis_data, chunks=chunks)
