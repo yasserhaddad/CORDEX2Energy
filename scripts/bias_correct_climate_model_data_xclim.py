@@ -9,6 +9,7 @@ from src.bias_correction import BiasCorrection
 
 import dask
 from dask.distributed import Client, LocalCluster
+from dask.diagnostics import ProgressBar
 import time
 import json
 import shutil
@@ -69,21 +70,20 @@ if __name__ == "__main__":
     client = None
 
     if args.nr_processes > 1:
-        # dask.config.set(num_workers=args.nr_processes,
-        #                 scheduler="processes",
-        #                 memory_limit=args.memory_limit)
+        dask.config.set(num_workers=args.nr_processes,
+                        scheduler="processes")
         dask.config.set({"array.chunk-size": "500MiB"})
 
-        cluster = LocalCluster(
-            processes=True,
-            n_workers=args.nr_processes,
-            threads_per_worker=1,
-            memory_limit=args.memory_limit,
-            resources={'CPU': 1},
-            dashboard_address=":36569"
-        )
-        client=Client(cluster)
-        print(cluster.dashboard_link)
+        # cluster = LocalCluster(
+        #     processes=True,
+        #     n_workers=args.nr_processes,
+        #     threads_per_worker=1,
+        #     memory_limit=args.memory_limit,
+        #     resources={'CPU': 1},
+        #     dashboard_address=":36569"
+        # )
+        # client=Client(cluster)
+        # print(cluster.dashboard_link)
 
     # Define input and output paths
     regridded_cordex_var_path = (
@@ -119,6 +119,9 @@ if __name__ == "__main__":
         extent=extent,
         load=False,
     )
+
+    climate_data.ds_data = climate_data.ds_data.chunk(chunks)
+    reanalysis_data.ds_data = reanalysis_data.ds_data.chunk(chunks)
 
     if args.height_ref is not None:
         reanalysis_data.ds_data = reanalysis_data.ds_data.sel(
@@ -175,7 +178,7 @@ if __name__ == "__main__":
         default_parameters=args.default_parameters,
         output_path=temp_output_dir,
         load_data=False,
-        print_time=False,
+        print_time=True,
     )
 
     # Limit relative humidity to [0, 100]
@@ -183,6 +186,7 @@ if __name__ == "__main__":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
         print("Relative humidity clipped to [0, 100].")
 
+    print("Bias correction completed. Saving data...")
     # Save the bias-corrected data
     target_chunks = {
         "time": 365 if args.temp_res == "day" else 2920,
@@ -201,11 +205,12 @@ if __name__ == "__main__":
     if (output_bias_corrected_cordex_var_path / f"{args.variable}.zarr").exists():
         shutil.rmtree(output_bias_corrected_cordex_var_path / f"{args.variable}.zarr")
 
-    ds_bias_corrected.chunk(target_chunks).to_zarr(
-        output_bias_corrected_cordex_var_path / f"{args.variable}.zarr",
-        mode="w",
-        encoding=zarr_encoding,
-    )
+    with ProgressBar(dt=60):
+        ds_bias_corrected.to_zarr(
+            output_bias_corrected_cordex_var_path / f"{args.variable}.zarr",
+            mode="w",
+            encoding=zarr_encoding,
+        )
     print(f"Data saved to {output_bias_corrected_cordex_var_path / f'{args.variable}.zarr'}.")
 
     shutil.rmtree(temp_output_dir)

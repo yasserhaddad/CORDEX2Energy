@@ -243,10 +243,8 @@ class BiasCorrection:
         None
         """
         if self.client is not None:
-            debiased_data = self.client.scatter(debiased_data, broadcast=True)
-        debiased_data.chunk({"time": -1, "lat": 20, "lon": 20}).to_zarr(
-            output_path / f"{data_var}_hour_{hour}.zarr", mode="w"
-        )
+            debiased_data = debiased_data.persist()
+        debiased_data.to_zarr(output_path / f"{data_var}_hour_{hour}.zarr", mode="w")
 
     def concatenate_saved_data(self, output_path, data_var, hours):
         """
@@ -266,11 +264,20 @@ class BiasCorrection:
         xarray.Dataset
             The concatenated dataset sorted by time.
         """
-        ds_climate_model_data_future_debiased = xr.open_mfdataset(
-            [output_path / f"{data_var}_hour_{hour}.zarr" for hour in hours],
-            concat_dim="time",
-            combine="nested",
-        ).sortby("time")
+        print("Contactenating saved data...")
+
+        datasets = [
+            xr.open_zarr(output_path / f"{data_var}_hour_{hour}.zarr").load()
+            for hour in hours
+        ]
+        ds_climate_model_data_future_debiased = xr.concat(datasets, dim="time").sortby("time")
+
+        # ds_climate_model_data_future_debiased = xr.open_mfdataset(
+        #     [output_path / f"{data_var}_hour_{hour}.zarr" for hour in hours],
+        #     concat_dim="time",
+        #     combine="nested",
+        #     parallel=True
+        # ).sortby("time").compute()
         return ds_climate_model_data_future_debiased
 
     def bias_correction_xclim(
@@ -341,9 +348,6 @@ class BiasCorrection:
         )
 
         def process_and_save_hour(hour):
-            if print_time:
-                print(f"\tHour: {hour}")
-
             if (output_path / f"{data_var}_hour_{hour}.zarr").exists():
                 return
 
