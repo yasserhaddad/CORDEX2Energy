@@ -1,6 +1,6 @@
 #!/bin/bash
 # Define the arguments
-paths_file="../paths_so4.json"
+paths_file="../../paths_so4.json"
 variables=("2t" "tp" "ssrd" "ws" "q" "2r" "sp")
 # variables=("10si")
 variables=("q")

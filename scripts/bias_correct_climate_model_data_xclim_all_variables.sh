@@ -14,12 +14,12 @@ temp_res="3hr"
 # nr_processes=20
 # memory_limit="auto"
 
-variables=("huss")
-variables_ref=("q")
-temp_res_array=("3hr")
-height_ref_array=(2)
-nr_processes=20
-memory_limit="60GB"
+# variables=("huss")
+# variables_ref=("q")
+# temp_res_array=("3hr")
+# height_ref_array=(2)
+# nr_processes=20
+# memory_limit="60GB"
 
 # Run on so4
 # variables=("pr" "psl")
@@ -45,12 +45,12 @@ memory_limit="60GB"
 # memory_limit="60GB"
 
 # Run on iacdipl-8
-# variables=("rsds")
-# variables_ref=("ssrd")
-# temp_res_array=("3hr")
-# height_ref_array=("None")
-# nr_processes=20
-# memory_limit="60GB"
+variables=("rsds")
+variables_ref=("ssrd")
+temp_res_array=("3hr")
+height_ref_array=("None")
+nr_processes=20
+memory_limit="60GB"
 
 
 for i in "${!variables[@]}"; do

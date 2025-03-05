@@ -47,7 +47,7 @@ if __name__ == "__main__":
         "--nr_processes",
         type=int,
         default=8,
-        help="Height to select from the reference dataset.",
+        help="Number of cores to use for parallel processing.",
     )
     parser.add_argument(
         "--memory_limit",

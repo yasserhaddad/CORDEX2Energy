@@ -1,4 +1,4 @@
-paths_file="../paths.json"
+paths_file="../../paths.json"
 model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 scenario="rcp85"
 temp_res="3hr"

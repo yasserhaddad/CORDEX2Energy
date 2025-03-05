@@ -32,6 +32,7 @@ def calculate_specific_humidity(
     temperature: xr.DataArray,
     relative_humidity: xr.DataArray,
     surface_pressure: xr.DataArray,
+    dask: str = "forbidden"
 ) -> xr.DataArray:
     """
     Calculate specific humidity from temperature, relative humidity, and surface pressure.
@@ -68,4 +69,5 @@ def calculate_specific_humidity(
         relative_humidity,
         surface_pressure,
         output_dtypes=[np.float32],
+        dask=dask
     )

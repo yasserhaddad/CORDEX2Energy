@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append("..")
+sys.path.append("../..")
 
 import time
 import json
@@ -51,7 +51,6 @@ def convert_cordex_wind_components_to_speed(
         t_start = time.time()
         print(f"\tProcessing {u_file.stem.split('_')[-1]}")
         # Load the data for the current year
-        # chunks = {"time": 2920, "y": 40, "x": 40}
         ds_u = xr.open_dataset(u_file).sortby("time").compute()
         ds_v = xr.open_dataset(v_file).sortby("time").compute()
 
