@@ -20,7 +20,7 @@ def get_paths_cerra_data(
 ) -> Path:
     if variable == "skt" or variable == "tp" or variable == "sro":
         cerra_path = path_data_cerra_land / "original" / variable
-    elif variable == "q":
+    elif variable == "q" or variable == "ro":
         cerra_path = path_data_processed / "cerra_processed" / variable
     else:
         cerra_path = path_data_cerra / "original" / variable
@@ -50,13 +50,14 @@ if __name__ == "__main__":
     # Remap the data to the target grid
     temp_output_dir = path_data_processed / "cerra_processed" / "temp" / args.variable
     temp_output_dir.mkdir(parents=True, exist_ok=True)
+    climate_grid_file = "g010_MERIT_2.txt" if args.variable == "ro" else "grid_EUR11_lonlat_griddes.txt"
 
     for sim_path in path_data_cerra_var.glob("*.nc"):
         cdo_remap(
             sim_path,
             temp_output_dir / sim_path.name,
             "conservative",
-            path_data_processed / "climate_grids" / "grid_EUR11_lonlat_griddes.txt",
+            path_data_processed / "climate_grids" / climate_grid_file,
         )
 
     # Process the remapped data

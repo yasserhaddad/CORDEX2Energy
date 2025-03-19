@@ -272,12 +272,6 @@ class BiasCorrection:
         ]
         ds_climate_model_data_future_debiased = xr.concat(datasets, dim="time").sortby("time")
 
-        # ds_climate_model_data_future_debiased = xr.open_mfdataset(
-        #     [output_path / f"{data_var}_hour_{hour}.zarr" for hour in hours],
-        #     concat_dim="time",
-        #     combine="nested",
-        #     parallel=True
-        # ).sortby("time").compute()
         return ds_climate_model_data_future_debiased
 
     def bias_correction_xclim(
@@ -396,6 +390,7 @@ class BiasCorrection:
                     running_window_length,
                     **params,
                 )
+                ds_climate_model_data_future_debiased = ds_climate_model_data_future_debiased
             if print_time:
                 print(f"\tTime: {(time.time() - time_start) / 60:.2f} min")
         else:

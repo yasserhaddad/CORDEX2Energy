@@ -106,7 +106,9 @@ def get_valid_hours(time_resolution, start_hour=0):
     # Convert resolution to hours
     hours_step = time_resolution.total_seconds() / 3600  # Convert to hours
     if hours_step < 1:
-        raise ValueError("Resolution is too fine (<1 hour), which is unusual for this method.")
+        raise ValueError(
+            "Resolution is too fine (<1 hour), which is unusual for this method."
+        )
 
     # Generate hours starting from start_hour up to 24
     valid_hours = np.arange(start_hour, 24, hours_step, dtype=int)
@@ -134,7 +136,12 @@ def get_specific_hourly_data(ds: xr.Dataset, hour: int) -> xr.Dataset:
     return ds.sel(time=ds.time.dt.hour == hour)
 
 
-def match_time_steps(ds_data: xr.Dataset, ds_reference: xr.Dataset, time_res: str, skip_leap_days: bool = True) -> xr.Dataset:
+def match_time_steps(
+    ds_data: xr.Dataset,
+    ds_reference: xr.Dataset,
+    time_res: str,
+    skip_leap_days: bool = True,
+) -> xr.Dataset:
     """
     Adjust the time steps of the reference dataset to match the time steps of the data dataset.
 
@@ -152,7 +159,9 @@ def match_time_steps(ds_data: xr.Dataset, ds_reference: xr.Dataset, time_res: st
     xr.Dataset
         The reference dataset with adjusted time steps.
     """
-    if not np.array_equal(np.unique(ds_data.time.dt.hour), np.unique(ds_reference.time.dt.hour)):
+    if not np.array_equal(
+        np.unique(ds_data.time.dt.hour), np.unique(ds_reference.time.dt.hour)
+    ):
         print("Adjusting time steps of the reference dataset")
         original_length = len(ds_reference.time)
         first_time_step = pd.to_datetime(ds_data.time.values[0])
@@ -167,7 +176,9 @@ def match_time_steps(ds_data: xr.Dataset, ds_reference: xr.Dataset, time_res: st
                     new_time.append(current_date)
                 current_date += pd.to_timedelta(time_res)
         else:
-            new_time = pd.date_range(start=start_date, periods=original_length, freq=time_res)
+            new_time = pd.date_range(
+                start=start_date, periods=original_length, freq=time_res
+            )
         ds_reference = ds_reference.assign_coords(time=new_time)
 
     return ds_reference
@@ -198,9 +209,13 @@ def get_min_max(ds: xr.Dataset, time_resolution: str) -> xr.Dataset:
     try:
         pd.to_timedelta(time_resolution)
     except ValueError:
-        raise ValueError("time_resolution must be a string in a format recognized by pandas.to_timedelta")
+        raise ValueError(
+            "time_resolution must be a string in a format recognized by pandas.to_timedelta"
+        )
 
-    return ds.resample(time=time_resolution).min(), ds.resample(time=time_resolution).max()
+    return ds.resample(time=time_resolution).min(), ds.resample(
+        time=time_resolution
+    ).max()
 
 
 def add_values_missing_ocean(
@@ -253,3 +268,116 @@ def add_noise_to_constant_grid_cells(
         np.random.randint(0, noise_level + 1, da.shape), dims=da.dims
     )
     return da.where(~mask_constant, da + random_values_reanalysis), mask_constant
+
+
+def compute_sub_daily_climatology(ds: xr.Dataset, time_dim: str = "time") -> xr.Dataset:
+    """
+    Compute the sub-daily climatology of an xarray Dataset.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset.
+    time_dim : str, optional
+        The name of the time dimension (default is "time").
+
+    Returns
+    -------
+    xr.Dataset
+        The sub-daily climatology of the input dataset.
+    """
+    return ds.groupby([f"{time_dim}.dayofyear", f"{time_dim}.hour"]).mean()
+
+
+def compute_daily_climatology(ds: xr.Dataset, time_dim: str = "time") -> xr.Dataset:
+    """
+    Compute the daily climatology of an xarray Dataset.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset.
+    time_dim : str, optional
+        The name of the time dimension (default is "time").
+
+    Returns
+    -------
+    xr.Dataset
+        The daily climatology of the input dataset.
+    """
+    return ds.groupby(f"{time_dim}.dayofyear").mean()
+
+
+def check_contiguous_years(ds: xr.Dataset, time_dim: str = "time") -> List[int]:
+    """
+    Check if the years in an xarray Dataset are contiguous and have all expected time steps.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset.
+    time_dim : str, optional
+        The name of the time dimension (default is 'time').
+
+    Returns
+    -------
+    List[int]
+        A list of years with missing time steps in the dataset.
+    """
+    time_res = get_time_resolution(ds)
+    freq = f"{int(time_res.total_seconds() // 3600)}h"
+    full_time_index = pd.date_range(
+        start=ds[time_dim].values[0], end=ds[time_dim].values[-1], freq=freq
+    )
+    ds_time_index = pd.DatetimeIndex(ds[time_dim].values)
+
+    missing_times = full_time_index.difference(ds_time_index)
+    missing_years = missing_times.year.unique()
+
+    return sorted(missing_years)
+
+
+def fill_missing_years_with_climatology(
+    ds: xr.Dataset, climatology: xr.Dataset = None
+) -> xr.Dataset:
+    """
+    Fill missing years in an xarray Dataset with the sub-daily climatology.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset with missing years.
+    climatology : xr.Dataset, optional
+        The sub-daily climatology to use for filling missing years (default is None).
+
+    Returns
+    -------
+    xr.Dataset
+        The input dataset with missing years filled using the sub-daily climatology.
+    """
+    time_res = get_time_resolution(ds)
+    if climatology is None:
+        if time_res < pd.Timedelta(days=1):
+            climatology = compute_sub_daily_climatology(ds)
+        else:
+            climatology = compute_daily_climatology(ds)
+
+    freq = f"{int(time_res.total_seconds() // 3600)}h"
+    date_range = pd.date_range(
+        start=ds.time[0].values, end=ds.time[-1].values, freq=freq
+    )
+    ds = ds.reindex(time=date_range).assign_coords(time=date_range)
+    if time_res < pd.Timedelta(days=1):
+        ds = (
+            ds.groupby(["time.dayofyear", "time.hour"])
+            .apply(
+                lambda x: x.fillna(
+                    climatology.sel(dayofyear=x.time.dt.dayofyear, hour=x.time.dt.hour)
+                )
+            )
+            .drop_vars(["dayofyear", "hour"])
+        )
+    else:
+        ds = ds.groupby("time.dayofyear").fillna(climatology).drop_vars("dayofyear")
+
+    return ds

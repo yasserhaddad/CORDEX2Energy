@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append("..")
+sys.path.append("../..")
 
 from src.load_data import ClimateModelData, ClimateReanalysisData
 from src.constants import COMPRESSED_ZARR_ENCODING
@@ -151,6 +151,22 @@ if __name__ == "__main__":
             reanalysis_data.ds_data[args.variable_ref].attrs["units"] = "W m**-2"
             print("Reference data units converted to W m-2.")
 
+    if args.variable == "mrro":
+        if climate_data.ds_data[args.variable].units == "kg m-2 s-1":
+            climate_data.ds_data = climate_data.ds_data * 86400
+            climate_data.ds_data[args.variable].attrs["units"] = "kg m-2"
+            print("Climate data units converted to kg m-2.")
+        if "lev" in reanalysis_data.ds_data.coords:
+            if len(reanalysis_data.ds_data.lev) > 1:
+                raise ValueError("Reference data has multiple levels.")
+
+            reanalysis_data.ds_data = reanalysis_data.ds_data.isel(lev=0)
+            print("Reference data level selected.")
+
+        mask_nan = climate_data.ds_data[args.variable].notnull()
+        climate_data.ds_data = climate_data.ds_data.fillna(0)
+        reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(0)
+
     temp_output_dir = (
         path_data_processed
         / "cordex_processed"
@@ -159,7 +175,7 @@ if __name__ == "__main__":
         / "bias_corrected"
         / args.variable
     )
-    temp_output_dir.mkdir(exist_ok=True)
+    temp_output_dir.mkdir(exist_ok=True, parents=True)
 
     # Perform bias correction
     bias_correction = BiasCorrection(
@@ -185,6 +201,11 @@ if __name__ == "__main__":
     if args.variable == "hurs":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
         print("Relative humidity clipped to [0, 100].")
+
+    if args.variable == "mrro":
+        # ds_bias_corrected = ds_bias_corrected.where(mask_nan).compute()
+        ds_bias_corrected = ds_bias_corrected.compute()
+        print("Missing values restored.")
 
     print("Bias correction completed. Saving data...")
     # Save the bias-corrected data

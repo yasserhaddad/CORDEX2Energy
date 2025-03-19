@@ -1,18 +1,17 @@
 #!/bin/bash
 # Define the arguments
 
-paths_file="../paths_so4.json"
+paths_file="../../paths_so4.json"
 model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 scenario="rcp85"
-temp_res="3hr"
 
 # # Run on exo
-# variables=("tas" "hurs" "huss")
-# variables_ref=("2t" "2r" "q")
-# temp_res_array=("3hr" "3hr" "3hr")
-# height_ref_array=(2 2 2)
-# nr_processes=20
-# memory_limit="auto"
+variables=("tas" "hurs")
+variables_ref=("2t" "2r")
+temp_res_array=("3hr" "3hr")
+height_ref_array=(2 2)
+nr_processes=20
+memory_limit="auto"
 
 # variables=("huss")
 # variables_ref=("q")
@@ -22,12 +21,12 @@ temp_res="3hr"
 # memory_limit="60GB"
 
 # Run on so4
-# variables=("pr" "psl")
-# variables_ref=("tp" "sp")
-# temp_res_array=("day" "3hr")
-# height_ref_array=("None" "None")
-# nr_processes=20
-# memory_limit="auto"
+variables=("pr" "mrro" "psl")
+variables_ref=("tp" "ro" "sp")
+temp_res_array=("day" "day" "3hr")
+height_ref_array=("None" "None" "None")
+nr_processes=20
+memory_limit="auto"
 
 # Run on iacdipl-7
 # variables=("wind100m" "wind150m" "wind200m" "sfcWind")
@@ -37,20 +36,20 @@ temp_res="3hr"
 # nr_processes=30
 # memory_limit="auto"
 
-# variables=("wind150m" "wind200m" "sfcWind")
-# variables_ref=("ws" "ws" "10si")
-# temp_res_array=("3hr" "3hr" "3hr")
-# height_ref_array=(150 200 10)
-# nr_processes=20
-# memory_limit="60GB"
-
-# Run on iacdipl-8
-variables=("rsds")
-variables_ref=("ssrd")
-temp_res_array=("3hr")
+variables=("mrro")
+variables_ref=("ro")
+temp_res_array=("day")
 height_ref_array=("None")
 nr_processes=20
 memory_limit="60GB"
+
+# Run on iacdipl-8
+# variables=("rsds")
+# variables_ref=("ssrd")
+# temp_res_array=("3hr")
+# height_ref_array=("None")
+# nr_processes=20
+# memory_limit="60GB"
 
 
 for i in "${!variables[@]}"; do

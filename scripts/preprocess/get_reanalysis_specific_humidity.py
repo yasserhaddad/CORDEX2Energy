@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append("..")
+sys.path.append("../..")
 
 import time
 import json
@@ -12,7 +12,7 @@ from src.convert_climate_vars import (
 )
 from src.cdo_commands import cdo_setgrid
 
-with open("../paths_so4.json") as f:
+with open("../../paths_so4.json") as f:
     paths = json.load(f)
 
 path_data_processed = Path(paths["path_data_processed"])

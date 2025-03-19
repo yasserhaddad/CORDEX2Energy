@@ -132,7 +132,7 @@ def timedelta_to_freq(timedelta: Union[pd.Timedelta, datetime.timedelta]) -> str
         return f"{days}D"
     elif seconds >= 3600:  # Hours
         hours = seconds // 3600
-        return f"{hours}H"
+        return f"{hours}h"
     elif seconds >= 60:  # Minutes
         minutes = seconds // 60
         return f"{minutes}min"

@@ -3,17 +3,19 @@
 paths_file="../../paths_so4.json"
 model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 scenario="rcp85"
-# variables=("tas" "huss" "hurs" "rsds" "sfcWind" "psl" "wind100m" "wind150m" "wind200m")
+variables=("tas" "huss" "hurs" "rsds" "sfcWind" "psl")
+temp_res="3hr"
+# variables=("wind100m" "wind150m" "wind200m")
 # temp_res="3hr"
-# variables=("pr")
-# temp_res="day"
+variables=("pr" "mrro" "clt")
+temp_res="day"
 variables=("mrro")
 temp_res="day"
 
 # Loop through each variable and run the script
 for variable in "${variables[@]}"; do
     echo "Processing variable: $variable"
-    python process_raw_climate_model_data.py "$paths_file" "$model" "$scenario" "$variable" "$temp_res"
+    python -u process_raw_climate_model_data.py "$paths_file" "$model" "$scenario" "$variable" "$temp_res"
 done
 
 echo "All variables processed."

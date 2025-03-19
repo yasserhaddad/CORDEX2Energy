@@ -85,7 +85,7 @@ if __name__ == "__main__":
     parser.add_argument("temp_res", type=str, help="Temporal resolution.")
 
     args = parser.parse_args()
-    with open("../paths.json") as f:
+    with open(args.paths_file) as f:
         paths = json.load(f)
 
     cordex_wind, cordex_wind_hist = get_raw_cordex_data_paths(

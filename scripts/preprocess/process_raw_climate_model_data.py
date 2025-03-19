@@ -49,6 +49,8 @@ if __name__ == "__main__":
     path_data_adjusted_cordex = Path(paths["path_data_adjusted_cordex"])
     path_data_personal_cordex = Path(paths["path_data_personal"]) / "cordex" / "EUR-11"
 
+    climate_grid_file = "g010_MERIT_2.txt" if args.variable == "mrro" else "grid_EUR11_lonlat_griddes.txt"
+
     time_start = time()
     cordex_tas, cordex_tas_hist = get_raw_cordex_data_paths(
         path_data_personal_cordex
@@ -75,14 +77,14 @@ if __name__ == "__main__":
             str(sim_path),
             str(temp_output_dir / "hist" / sim_path.name),
             "conservative",
-            path_data_processed / "climate_grids" / "grid_EUR11_lonlat_griddes.txt",
+            path_data_processed / "climate_grids" / climate_grid_file,
         )
     for sim_path in cordex_tas.glob("*.nc"):
         cdo_remap(
             str(sim_path),
             str(temp_output_dir / "future" / sim_path.name),
             "conservative",
-            path_data_processed / "climate_grids" / "grid_EUR11_lonlat_griddes.txt",
+            path_data_processed / "climate_grids" / climate_grid_file,
         )
 
     print(
@@ -139,7 +141,7 @@ if __name__ == "__main__":
         output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
     )
 
-    shutil.rmtree(temp_output_dir)
+    shutil.rmtree(temp_output_dir, ignore_errors=True)
 
     print(
         f"\tProcessing time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."

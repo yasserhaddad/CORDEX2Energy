@@ -1,3 +1,5 @@
+import sys
+
 import argparse
 import json
 import dask
@@ -5,6 +7,9 @@ from dask.diagnostics import ProgressBar
 from pathlib import Path
 
 import xarray as xr
+
+sys.path.append("../..")
+from src.constants import COMPRESSED_ZARR_ENCODING
 
 dask.config.set({'distributed.worker.multiprocessing-method': 'forkserver'})
 dask.config.set({'distributed.worker.use-file-locking': 'False'})
@@ -37,8 +42,24 @@ if __name__ == "__main__":
     )
 
     for file in (bias_corrected_data_dir / args.temp_res).glob("*.zarr"):
-        with ProgressBar(dt=60):
+        print(f"Processing {file.name}")
+        with ProgressBar(dt=10):
             ds = aggregate_to_daily(
                 xr.open_zarr(file)
             ).compute()
-            ds.to_zarr(bias_corrected_data_dir / "day" / file.name, mode="w")
+
+            output_path = bias_corrected_data_dir / "day" / file.name
+            target_chunks = {
+                "time": 365,
+                "lat": 256,
+                "lon": 256
+            }
+
+            zarr_encoding = {
+                var: {
+                    "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
+                    "chunks": tuple(target_chunks.values()),
+                }
+                for var in ds.data_vars
+            }
+            ds.to_zarr(output_path, mode="w")
