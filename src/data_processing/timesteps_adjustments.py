@@ -1,9 +1,7 @@
 import datetime
 from typing import Dict, Union
-import numpy as np
 import xarray as xr
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
 def extract_adjusted_timesteps(
@@ -51,11 +49,17 @@ def extract_adjusted_timesteps(
     start_year = mapping["start_year"].item()
 
     if "mode" in mapping.columns:
-        if mapping["mode"].item() == "original":
+        if "original" in mapping["mode"].item():
             if mapping["start_year"].item() > 1991:
                 start_year = 1991
                 missing_years = list(range(1991, mapping["start_year"].item()))
                 year_list = missing_years + year_list
+            if mapping["year_list"].item()[0] > 1991:
+                missing_years = list(range(1991, mapping["year_list"].item()[0]))
+                year_list = missing_years + year_list
+            if mapping["year_list"].item()[-1] < 2099:
+                missing_years = list(range(mapping["year_list"].item()[-1] + 1, 2100))
+                year_list = year_list + missing_years
 
     timesteps = None
     for y in year_list:

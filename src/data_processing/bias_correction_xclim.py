@@ -118,7 +118,7 @@ DICT_DEFAULT_XCLIM_PARAMETERS = {
         "extrapolation": "constant",
         "interp": "linear",
         "adapt_freq_thresh": None,
-        "jitter_under_thresh_value": "0.1 W m**-2",
+        "jitter_under_thresh_value": "0.01 W m**-2",
     },
     "mrro": {
         "nquantiles": 99,
@@ -127,5 +127,12 @@ DICT_DEFAULT_XCLIM_PARAMETERS = {
         "interp": "linear",
         "adapt_freq_thresh": None,
         "jitter_under_thresh_value": "0.001 kg m**-2",
+    },
+    "clt": {
+        "nquantiles": 99,
+        "adjustment_kind": "*",
+        "extrapolation": "constant",
+        "interp": "linear",
+        "adapt_freq_thresh": None,
     },
 }

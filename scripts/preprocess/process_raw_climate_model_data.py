@@ -9,11 +9,11 @@ import argparse
 import pandas as pd
 from pathlib import Path
 from time import time
-from src.constants import COMPRESSED_ZARR_ENCODING
-from src.load_data import ClimateModelData
-from src.cdo_commands import cdo_remap
-from src.timesteps_adjustments import extract_adjusted_timesteps
-from src.utils_load_data import get_raw_cordex_data_paths
+from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.data_processing.load_data import ClimateModelData
+from src.utils.cdo_commands import cdo_remap
+from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
+from src.utils.utils_load_data import get_raw_cordex_data_paths
 
 
 def get_adjusted_timesteps(
@@ -48,7 +48,7 @@ if __name__ == "__main__":
     path_data_cordex = Path(paths["path_data_cordex"])
     path_data_adjusted_cordex = Path(paths["path_data_adjusted_cordex"])
     path_data_personal_cordex = Path(paths["path_data_personal"]) / "cordex" / "EUR-11"
-
+    path_data_temporary = Path(paths["path_data_temporary"])
     climate_grid_file = "g010_MERIT_2.txt" if args.variable == "mrro" else "grid_EUR11_lonlat_griddes.txt"
 
     time_start = time()
@@ -63,23 +63,33 @@ if __name__ == "__main__":
     )
 
     temp_output_dir = (
-        path_data_processed
+        path_data_temporary
         / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "temp"
         / args.variable
     )
+
     temp_output_dir.mkdir(parents=True, exist_ok=True)
     (temp_output_dir / "hist").mkdir(parents=True, exist_ok=True)
     (temp_output_dir / "future").mkdir(parents=True, exist_ok=True)
+    print("Remapping historical data.")
     for sim_path in cordex_tas_hist.glob("*.nc"):
+        if (temp_output_dir / "hist" / sim_path.name).exists():
+            continue
+        print(sim_path.name)
         cdo_remap(
             str(sim_path),
             str(temp_output_dir / "hist" / sim_path.name),
             "conservative",
             path_data_processed / "climate_grids" / climate_grid_file,
         )
+    print("Historical data remapped.")
+    print("Remapping future data.")
     for sim_path in cordex_tas.glob("*.nc"):
+        if (temp_output_dir / "future" / sim_path.name).exists():
+            continue
+        print(sim_path.name)
         cdo_remap(
             str(sim_path),
             str(temp_output_dir / "future" / sim_path.name),
@@ -95,8 +105,15 @@ if __name__ == "__main__":
         path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
     )
 
+    adjusted_timesteps = {
+        "original_timesteps": pd.date_range("01-01-1991 00:00", "12-31-2099 00:00", freq="D"),
+        "start_year": 1991,
+    }
+
     chunks = None
-    extent = None
+    extent = (
+        {'lat_min': 20.8, 'lat_max': 71.8, 'lon_min': -51.7, 'lon_max': 72.7}
+        if args.variable == "mrro" else None)
 
     climate_data = ClimateModelData(
         temp_output_dir / "future",
@@ -107,12 +124,6 @@ if __name__ == "__main__":
         extent=extent,
         load=False,
     )
-
-    if args.variable.startswith("wind"):
-        climate_data.ds_data[args.variable].attrs.update({
-            "long_name": "Wind speed",
-            "standard_name": "wind_speed",
-        })
 
     output_path = (
         path_data_processed

@@ -2,7 +2,7 @@ from typing import List, Union
 import xarray as xr
 import numpy as np
 import pandas as pd
-
+from collections import Counter
 
 def xr_reorder_coords(ds: xr.Dataset, new_order: List[str]) -> xr.Dataset:
     """
@@ -136,6 +136,163 @@ def get_specific_hourly_data(ds: xr.Dataset, hour: int) -> xr.Dataset:
     return ds.sel(time=ds.time.dt.hour == hour)
 
 
+def match_instaneous_to_mean_values(
+    ds_data: xr.Dataset,
+    skip_leap_days: bool = True,
+    time_res: str = "1h",
+) -> xr.Dataset:
+    """
+    Matches instantaneous data to mean values over a specified time resolution.
+    This function interpolates the input dataset to an hourly time range and then
+    resamples it to compute mean values over the specified time resolution. Optionally,
+    it can skip leap days during the interpolation process.
+    Parameters
+    ----------
+    ds_data : xr.Dataset
+        The input xarray Dataset containing time-series data.
+    skip_leap_days : bool, optional
+        If True, removes leap days (February 29) from the time range before interpolation.
+        Default is True.
+    time_res : str, optional
+        The desired time resolution for resampling (e.g., "1h" for hourly, "1D" for daily).
+        Default is "1h".
+    Returns
+    -------
+    xr.Dataset
+        The resampled xarray Dataset with mean values over the specified time resolution.
+    Notes
+    -----
+    - The function assumes that the input dataset has a `time` coordinate.
+    - Leap days are removed only during the interpolation step if `skip_leap_days` is True.
+    """
+    time_range = pd.date_range(
+        start=ds_data.time.values[0],
+        end=ds_data.time.values[-1],
+        freq='1h'
+    )
+
+    data_hourly = ds_data.interp(time=time_range)
+    ds_data = data_hourly.resample(time=time_res, label='left', closed='left').mean()
+    if skip_leap_days:
+        # Remove leap days from the time range
+        ds_data = ds_data.sel(time=~((ds_data["time.month"] == 2) & (ds_data["time.day"] == 29)))
+
+    return ds_data
+
+
+def match_time_steps_interpolate(
+    ds_data: xr.Dataset,
+    ds_reference: xr.Dataset,
+    skip_leap_days: bool = True,
+    average: bool = False,
+) -> xr.Dataset:
+    """
+    Adjust the time steps of the reference dataset to match the time steps of the data dataset.
+
+    Parameters
+    ----------
+
+    ds_data : xr.Dataset
+        The dataset containing the desired time steps.
+    ds_reference : xr.Dataset
+        The reference dataset to be adjusted.
+    skip_leap_days : bool, optional
+        Whether to skip leap days when adjusting the time steps.
+        Default is True.
+
+    Returns
+    -------
+    xr.Dataset
+        The reference dataset with adjusted time steps.
+    """
+    if not np.array_equal(
+        np.unique(ds_data.time.dt.hour), np.unique(ds_reference.time.dt.hour)
+    ):
+        print("Adjusting time steps of the reference dataset")
+        # Step 1: Create a new time index with hourly values spanning the time range of ds_data
+        first_time_step = pd.to_datetime(ds_data.time.values[0])
+        time_res = get_time_resolution(ds_data)
+        start_date = pd.to_datetime(ds_reference.time.values[0]).replace(
+            hour=first_time_step.hour, minute=first_time_step.minute
+        )
+        time_range = pd.date_range(
+            start=start_date,
+            end=pd.to_datetime(ds_data.time.max().item()),
+            freq="h",
+        )
+        if skip_leap_days:
+            # Remove leap days from the time range
+            time_range = time_range[~((time_range.month == 2) & (time_range.day == 29))]
+
+        # Step 2: Interpolate ds_rsds_bc_subset to the new hourly time index
+        # Step 3: Fill NaN values at the beginning and at the end of the time series
+        ds_reference_hourly = (
+            ds_reference.interp(time=time_range).bfill(dim="time").ffill(dim="time")
+        )
+
+        # Step 4: Extract the timesteps needed to match ds_tas_bc_subset
+        if average:
+            # Average the values over the time dimension
+            ds_reference = ds_reference_hourly.resample(
+                time=pd.tseries.frequencies.to_offset(time_res).freqstr,
+                label='left',
+                closed='left'
+            ).mean()
+        else:
+            ds_reference = ds_reference_hourly.sel(time=ds_data.time)
+
+
+        del ds_reference_hourly
+
+    return ds_reference
+
+
+def get_time_offset(ds_data: xr.Dataset, ds_reference: xr.Dataset) -> pd.Timedelta:
+    """
+    Check if there's a time offset between the climate model data and the reference data.
+
+    Parameters
+    ----------
+    ds_data : xr.Dataset
+        The dataset containing the desired time steps.
+    ds_reference : xr.Dataset
+        The reference dataset to be checked.
+
+    Returns
+    -------
+    pd.Timedelta
+        The most common time offset between the two datasets.
+
+    Raises
+    ------
+    ValueError
+        If no common years are found between the datasets.
+    """
+    # Extract years from both datasets
+    years_data = set(ds_data.time.dt.year.values)
+    years_reference = set(ds_reference.time.dt.year.values)
+
+    # Find the common years
+    common_years = years_data.intersection(years_reference)
+
+    if not common_years:
+        raise ValueError("No common years found between the datasets.")
+
+    # Choose the first common year
+    common_year = int(np.median(list(common_years)))
+
+    # Compute time differences between the two datasets for the median common year
+    time_diffs_between = pd.to_timedelta(
+        ds_data.time.sel(time=str(common_year)).values -
+        ds_reference.time.sel(time=str(common_year)).values
+    )
+    most_common_offset_between = Counter(time_diffs_between).most_common(1)[0][0]
+    has_offset = most_common_offset_between != pd.Timedelta('0 days 00:00:00')
+    print(f"Is there an offset? {has_offset}")
+
+    return most_common_offset_between
+
+
 def match_time_steps(
     ds_data: xr.Dataset,
     ds_reference: xr.Dataset,
@@ -153,6 +310,9 @@ def match_time_steps(
         The reference dataset to be adjusted.
     time_res : str
         The time resolution to use for adjusting the time steps.
+    skip_leap_days : bool, optional
+        Whether to skip leap days when adjusting the time steps.
+        Default is True.
 
     Returns
     -------
@@ -179,7 +339,42 @@ def match_time_steps(
             new_time = pd.date_range(
                 start=start_date, periods=original_length, freq=time_res
             )
+
         ds_reference = ds_reference.assign_coords(time=new_time)
+
+    return ds_reference
+
+
+def match_time_steps_cordex_sub_daily(ds_data: xr.Dataset, ds_reference: xr.Dataset, time_res: str, skip_leap_days: True) -> xr.Dataset:
+    """
+    Adjust the time steps of the reference dataset to match the time steps of the data dataset.
+
+    Parameters
+    ----------
+    ds_data : xr.Dataset
+        The dataset containing the desired time steps.
+    ds_reference : xr.Dataset
+        The reference dataset to be adjusted.
+    time_res : str
+        The time resolution to use for adjusting the time steps.
+    skip_leap_days : bool, optional
+        Whether to skip leap days when adjusting the time steps.
+        Default is True.
+
+    Returns
+    -------
+    xr.Dataset
+        The reference dataset with adjusted time steps.
+    """
+    if not np.array_equal(
+        np.unique(ds_data.time.dt.hour), np.unique(ds_reference.time.dt.hour)
+    ):
+        print("Adjusting time steps of the reference dataset")
+        # Calculate the time difference between the first time steps of ds_data and ds_reference
+        time_offset = pd.to_datetime(ds_data.time.values[0]) - pd.to_datetime(ds_reference.time.values[0])
+
+        # Adjust the reference time steps by adding the calculated offset
+        ds_reference = ds_reference.assign_coords(time=ds_reference.time + time_offset)
 
     return ds_reference
 
@@ -381,3 +576,25 @@ def fill_missing_years_with_climatology(
         ds = ds.groupby("time.dayofyear").fillna(climatology).drop_vars("dayofyear")
 
     return ds
+
+
+def sel_extent(ds: Union[xr.Dataset, xr.DataArray], extent: dict) -> Union[xr.Dataset, xr.DataArray]:
+    """
+    Select a specific geographical extent from an xarray Dataset or DataArray.
+
+    Parameters
+    ----------
+    ds : Union[xr.Dataset, xr.DataArray]
+        The input xarray Dataset or DataArray.
+    extent : dict
+        A dictionary containing the geographical extent with keys 'lat_min', 'lat_max', 'lon_min', and 'lon_max'.
+
+    Returns
+    -------
+    Union[xr.Dataset, xr.DataArray]
+        The selected subset of the input dataset or data array.
+    """
+    return ds.sel(
+        lat=slice(extent["lat_min"], extent["lat_max"]),
+        lon=slice(extent["lon_min"], extent["lon_max"]),
+    )

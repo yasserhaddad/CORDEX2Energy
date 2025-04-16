@@ -46,3 +46,25 @@ def get_raw_cordex_data_paths(
     )
 
     return cordex_var, cordex_var_hist
+
+def get_orog_cordex_data_path(
+        path_data_cordex: Path,
+        climate_model_chain: str,
+        climate_scenario: str,
+) -> Path:
+    institute, rcm, gcm, ensemble = get_components_climate_model_chain(
+        climate_model_chain
+    )
+
+    orog_path = (
+        path_data_cordex
+        / climate_scenario
+        / "fx"
+        / "orog"
+        / institute
+        / gcm
+        / rcm
+        / ensemble
+    )
+
+    return orog_path

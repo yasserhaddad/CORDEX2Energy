@@ -1,19 +1,21 @@
 import sys
+import warnings
 
 sys.path.append("../..")
 
-import time
-import json
 import argparse
-import xarray as xr
+import json
+import time
 from pathlib import Path
 
-from src.convert_climate_vars import (
+import xarray as xr
+
+from src.data_processing.convert_climate_vars import (
     convert_wind_components_to_speed,
 )
-from src.utils_load_data import (
-    get_raw_cordex_data_paths,
+from src.utils.utils_load_data import (
     get_components_climate_model_chain,
+    get_raw_cordex_data_paths,
 )
 
 
@@ -45,6 +47,9 @@ def convert_cordex_wind_components_to_speed(
         )[0].glob("*/*.nc")
     )
 
+    # Variable to check if an overflow occurred in the computation
+    overflow = False
+
     print("Calculating wind speed...")
     # Iterate over each year of data
     for u_file, v_file in zip(u_path, v_path):
@@ -55,22 +60,61 @@ def convert_cordex_wind_components_to_speed(
         ds_v = xr.open_dataset(v_file).sortby("time").compute()
 
         # Calculate wind speed
-        ds_wind = ds_u.copy(
-            {
-                f"ua{height}m": convert_wind_components_to_speed(
+        ds_wind = ds_u.copy().drop_vars(f"ua{height}m")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")  # Capture all warnings
+            ds_wind[f"wind{height}m"] = convert_wind_components_to_speed(
+                ds_u[f"ua{height}m"], ds_v[f"va{height}m"]
+            )
+
+            # Check if the warning was triggered
+            for warning in w:
+                if issubclass(
+                    warning.category, RuntimeWarning
+                ) and "overflow encountered in square" in str(warning.message):
+                    overflow = True
+                    print("Caught RuntimeWarning:", warning.message)
+
+            # If an overflow occurred, remove outliers from the dataset by removing all values above 400 m/s
+            # and fill the missing values with the previous and next values
+            if overflow:
+                ds_u = ds_u[f"ua{height}m"] = (
+                    ds_u[f"ua{height}m"]
+                    .where(ds_u[f"ua{height}m"] < 400)
+                    .ffill("time")
+                    .bfill("time")
+                )
+                ds_v[f"va{height}m"] = (
+                    ds_v[f"va{height}m"]
+                    .where(ds_v[f"va{height}m"] < 400)
+                    .ffill("time")
+                    .bfill("time")
+                )
+                ds_wind[f"wind{height}m"] = convert_wind_components_to_speed(
                     ds_u[f"ua{height}m"], ds_v[f"va{height}m"]
                 )
+                ds_wind[f"wind{height}m"] = (
+                    ds_wind[f"wind{height}m"]
+                    .where(ds_wind[f"wind{height}m"] < 500)
+                    .ffill("time")
+                    .bfill("time")
+                )
+
+        ds_wind[f"wind{height}m"].attrs.update(ds_u[f"ua{height}m"].attrs)
+        ds_wind[f"wind{height}m"].attrs.update(
+            {
+                "long_name": "Wind speed",
+                "standard_name": "wind_speed",
+                "units": "m s-1",
+                "height": f"{height}m",
             }
-        ).rename({f"ua{height}m": f"wind{height}m"})
-        ds_wind[f"wind{height}m"].attrs.update({
-            "long_name": "Wind speed",
-            "standard_name": "wind_speed",
-            "units": "degrees_east"
-        })
+        )
 
         # Save the wind speed data
         filename = u_file.name.replace(f"ua{height}m", f"wind{height}m")
-        ds_wind.to_netcdf(output_dir / filename)
+        output_path = output_dir / filename
+        ds_wind.to_netcdf(output_path)
+
         print(f"\tProcessing time: {(time.time() - t_start) / 60:.2f} minutes.")
 
 

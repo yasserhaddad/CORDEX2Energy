@@ -1,24 +1,28 @@
+from copy import deepcopy
 import sys
+
+import pandas as pd
 
 sys.path.append("../..")
 
-from src.load_data import ClimateModelData, ClimateReanalysisData
-from src.constants import COMPRESSED_ZARR_ENCODING
-from src.utils_xarray import get_time_resolution
-from src.bias_correction import BiasCorrection
+from src.data_processing.load_data import ClimateModelData, ClimateReanalysisData
+from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.utils_xarray import get_time_resolution, get_time_offset
+from src.data_processing.bias_correction import BiasCorrection
 
 import dask
 from dask.distributed import Client, LocalCluster
 from dask.diagnostics import ProgressBar
+import xarray as xr
 import time
 import json
 import shutil
 import argparse
 from pathlib import Path
 
-dask.config.set({'distributed.worker.multiprocessing-method': 'forkserver'})
-dask.config.set({'distributed.worker.use-file-locking': 'False'})
-dask.config.set({'logging.distributed': 'error'})
+dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
+dask.config.set({"distributed.worker.use-file-locking": "False"})
+dask.config.set({"logging.distributed": "error"})
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process climate data.")
@@ -70,20 +74,8 @@ if __name__ == "__main__":
     client = None
 
     if args.nr_processes > 1:
-        dask.config.set(num_workers=args.nr_processes,
-                        scheduler="processes")
+        dask.config.set(num_workers=args.nr_processes, scheduler="processes")
         dask.config.set({"array.chunk-size": "500MiB"})
-
-        # cluster = LocalCluster(
-        #     processes=True,
-        #     n_workers=args.nr_processes,
-        #     threads_per_worker=1,
-        #     memory_limit=args.memory_limit,
-        #     resources={'CPU': 1},
-        #     dashboard_address=":36569"
-        # )
-        # client=Client(cluster)
-        # print(cluster.dashboard_link)
 
     # Define input and output paths
     regridded_cordex_var_path = (
@@ -106,7 +98,12 @@ if __name__ == "__main__":
 
     # Load data
     chunks = {"time": -1, "lat": 20, "lon": 20}
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
+
+    extent = (
+        {'lat_min': 20.8, 'lat_max': 71.8, 'lon_min': -51.7, 'lon_max': 72.7}
+        if args.variable == "mrro"
+        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
+    )
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
         chunks=chunks,
@@ -118,6 +115,7 @@ if __name__ == "__main__":
         chunks=chunks,
         extent=extent,
         load=False,
+        drop_leap_days=(args.variable != "rsds")
     )
 
     climate_data.ds_data = climate_data.ds_data.chunk(chunks)
@@ -151,6 +149,24 @@ if __name__ == "__main__":
             reanalysis_data.ds_data[args.variable_ref].attrs["units"] = "W m**-2"
             print("Reference data units converted to W m-2.")
 
+        # Check if the first time step of the climate data has hour and minutes as 1h30
+        most_common_offset_between = get_time_offset(
+            climate_data.ds_data, reanalysis_data.ds_data
+        )
+        if most_common_offset_between != pd.Timedelta('0 days 00:00:00'):
+            # Subtract 1 hour and 30 minutes from all timesteps using a time offset
+            reanalysis_data.ds_data = reanalysis_data.ds_data.assign_coords(
+                time=reanalysis_data.ds_data.time - most_common_offset_between
+            )
+            print(f"Subtracted the time offset {most_common_offset_between} from all timesteps of the reanalysis dataset.")
+
+        # Remove leap days from the reanalysis dataset
+        reanalysis_data.ds_data = reanalysis_data.ds_data.sel(
+            time=~(
+                (reanalysis_data.ds_data.time.dt.month == 2) & (reanalysis_data.ds_data.time.dt.day == 29)
+            )
+        )
+
     if args.variable == "mrro":
         if climate_data.ds_data[args.variable].units == "kg m-2 s-1":
             climate_data.ds_data = climate_data.ds_data * 86400
@@ -177,6 +193,7 @@ if __name__ == "__main__":
     )
     temp_output_dir.mkdir(exist_ok=True, parents=True)
 
+
     # Perform bias correction
     bias_correction = BiasCorrection(
         climate_data,
@@ -184,7 +201,7 @@ if __name__ == "__main__":
         reference_period=("1991", "2020"),
         future_period=("2021", "2100"),
         bias_correction_method=args.bias_correction_method,
-        client=client
+        client=client,
     )
 
     ds_bias_corrected = bias_correction.bias_correction_xclim(
@@ -197,22 +214,17 @@ if __name__ == "__main__":
         print_time=True,
     )
 
-    # Limit relative humidity to [0, 100]
-    if args.variable == "hurs":
+    # Limit relative humidity and cloud cover fraction to [0, 100]
+    if args.variable == "hurs" or args.variable == "clt":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
-        print("Relative humidity clipped to [0, 100].")
-
-    if args.variable == "mrro":
-        # ds_bias_corrected = ds_bias_corrected.where(mask_nan).compute()
-        ds_bias_corrected = ds_bias_corrected.compute()
-        print("Missing values restored.")
+        print("Values clipped to [0, 100].")
 
     print("Bias correction completed. Saving data...")
     # Save the bias-corrected data
     target_chunks = {
         "time": 365 if args.temp_res == "day" else 2920,
-        "lat": 256 if args.temp_res == "day"  else 128,
-        "lon": 256 if args.temp_res == "day"  else 128,
+        "lat": 256 if args.temp_res == "day" else 128,
+        "lon": 256 if args.temp_res == "day" else 128,
     }
 
     zarr_encoding = {
@@ -232,7 +244,9 @@ if __name__ == "__main__":
             mode="w",
             encoding=zarr_encoding,
         )
-    print(f"Data saved to {output_bias_corrected_cordex_var_path / f'{args.variable}.zarr'}.")
+    print(
+        f"Data saved to {output_bias_corrected_cordex_var_path / f'{args.variable}.zarr'}."
+    )
 
     shutil.rmtree(temp_output_dir)
     if client is not None:

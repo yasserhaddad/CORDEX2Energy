@@ -1,12 +1,11 @@
 from pathlib import Path
-from typing import Dict, List, Tuple
-import numpy as np
+from typing import Dict, List
 import xarray as xr
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from .timesteps_adjustments import get_new_timesteps
-from .utils_xarray import (
+from ..utils.utils_xarray import (
     xr_reorder_coords
 )
 

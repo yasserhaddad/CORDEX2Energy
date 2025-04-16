@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 import argparse
 from time import time
-from src.constants import COMPRESSED_ZARR_ENCODING
-from src.load_data import ClimateReanalysisData
-from src.cdo_commands import cdo_remap
+from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.data_processing.load_data import ClimateReanalysisData
+from src.utils.cdo_commands import cdo_remap
 import shutil
 
 
@@ -69,8 +69,12 @@ if __name__ == "__main__":
         chunks=chunks,
         extent=extent,
         reordered_coords=["time", "lat", "lon"],
+        drop_leap_days=False,
         load=False,
     )
+
+    if args.variable == "tcc":
+        reanalysis_data.ds_data = reanalysis_data.ds_data.resample(time="1D").mean()
 
     output_path = path_data_processed / "cerra_processed" / "regridded"
 

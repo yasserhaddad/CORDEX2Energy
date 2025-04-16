@@ -9,8 +9,8 @@ from pathlib import Path
 import dask
 import xarray as xr
 from dask.diagnostics import ProgressBar
-from src.constants import COMPRESSED_ZARR_ENCODING
-from src.convert_climate_vars import (
+from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.data_processing.convert_climate_vars import (
     calculate_specific_humidity,
 )
 

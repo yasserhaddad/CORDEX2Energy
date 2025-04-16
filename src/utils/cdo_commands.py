@@ -64,3 +64,29 @@ def cdo_setgrid(input_file_path: str, grid_path: str, output_file_path: str) -> 
 
     # Execute the CDO command
     subprocess.run(cdo_command, check=True)
+
+
+def save_cdo_griddes(input_path: str, output_path: str) -> None:
+    """
+    Save the grid definition of the input file to the specified output file.
+
+    Parameters
+    ----------
+    input_path : str
+        The path to the input file.
+    output_path : str
+        The path to the output file.
+    """
+    try:
+        # Run the cdo griddes command
+        result = subprocess.run(["cdo", "griddes", input_path], capture_output=True, text=True, check=True)
+
+        # Write the output to the specified file
+        with open(output_path, "w") as f:
+            f.write(result.stdout)
+
+        print(f"Grid definition saved to {output_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error running CDO: {e}")
+    except FileNotFoundError:
+        print("Error: CDO is not installed or not found in PATH.")

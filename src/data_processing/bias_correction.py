@@ -15,13 +15,13 @@ from .bias_correction_xclim import (
     empirical_quantile_mapping,
 )
 from .load_data import ClimateModelData, ClimateReanalysisData
-from .utils_xarray import (
+from ..utils.utils_xarray import (
     get_specific_hourly_data,
     get_time_resolution,
     get_valid_hours,
-    match_time_steps,
+    match_time_steps
 )
-from .metrics import compute_trend_statsmodel
+from ..utils.metrics import compute_trend_statsmodel
 
 sns.set_style("whitegrid", {"grid.color": ".93"})
 
@@ -89,12 +89,23 @@ class BiasCorrection:
             )
 
         first_time_step = pd.to_datetime(self.climate_data.ds_data.time.values[0])
-        self.reanalysis_data.ds_data = match_time_steps(
-            self.climate_data.ds_data,
-            self.reanalysis_data.ds_data,
-            time_res,
-            skip_leap_days=self.climate_data.drop_leap_days,
-        )
+        if not np.array_equal(
+            np.unique(self.climate_data.ds_data.time.dt.hour), np.unique(self.reanalysis_data.ds_data.time.dt.hour)
+        ):
+            # if time_res < pd.Timedelta(days=1):
+            #     with ProgressBar(dt=60):
+            #         self.reanalysis_data.ds_data = match_time_steps_interpolate(
+            #             self.climate_data.ds_data,
+            #             self.reanalysis_data.ds_data,
+            #             skip_leap_days=self.climate_data.drop_leap_days,
+            #         ).persist()
+            # else:
+            self.reanalysis_data.ds_data = match_time_steps(
+                self.climate_data.ds_data,
+                self.reanalysis_data.ds_data,
+                time_res,
+                skip_leap_days=self.climate_data.drop_leap_days,
+            )
 
         if time_res < pd.Timedelta(days=1):
             hours = get_valid_hours(time_res, first_time_step.hour)
@@ -353,10 +364,6 @@ class BiasCorrection:
                 da_climate_model_data_future, hour
             )
 
-            mask_constant_future = (
-                da_climate_model_data_future_hourly.std(dim="time") == 0
-            )
-
             debiased_data = self.perform_bias_correction(
                 bc,
                 da_reference_data_hourly,
@@ -368,13 +375,15 @@ class BiasCorrection:
             )
 
             if print_time:
-                print(f"\tTime: {(time.time() - time_start) / 60:.2f} min")
+                print(f"\tTime to perform bias correction: {(time.time() - time_start) / 60:.2f} min")
 
-            if "jitter_under_thresh_value" in params and mask_constant_future.any():
-                debiased_data = debiased_data.where(
-                    ~mask_constant_future,
-                    da_climate_model_data_future_hourly.mean("time"),
-                )
+            # if "jitter_under_thresh_value" in params and mask_constant_future.any():
+            #    debiased_data = debiased_data.where(
+            #        ~mask_constant_future,
+            #        da_climate_model_data_future_hourly.isel(time=0),
+            #    ).persist()
+            #    if print_time:
+            #        print(f"\tTime to perform restore constant values: {(time.time() - time_start) / 60:.2f} min")
 
             self.save_debiased_data(debiased_data, output_path, data_var, hour)
             del debiased_data

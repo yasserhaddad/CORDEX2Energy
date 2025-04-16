@@ -8,7 +8,7 @@ from pathlib import Path
 import xarray as xr
 
 sys.path.append("../..")
-from src.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING
 
 dask.config.set({'distributed.worker.multiprocessing-method': 'forkserver'})
 dask.config.set({'distributed.worker.use-file-locking': 'False'})

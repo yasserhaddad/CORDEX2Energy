@@ -8,8 +8,8 @@ from pathlib import Path
 
 import xarray as xr
 import numpy as np
-from src.cdo_commands import cdo_setgrid
-from src.utils_xarray import check_contiguous_years, fill_missing_years_with_climatology
+from src.utils.cdo_commands import cdo_setgrid
+from src.utils.utils_xarray import check_contiguous_years, fill_missing_years_with_climatology
 
 with open("../../paths_so4.json") as f:
     paths = json.load(f)
