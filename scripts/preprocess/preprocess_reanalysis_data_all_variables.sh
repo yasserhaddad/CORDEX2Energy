@@ -7,7 +7,7 @@ variables=("ssrd")
 # Loop through each variable and run the script
 for variable in "${variables[@]}"; do
     echo "Processing variable: $variable"
-    python process_raw_reanalysis_data.py "$paths_file" "$variable"
+    python preprocess_reanalysis_data.py "$paths_file" "$variable"
 done
 
 echo "All variables processed."

@@ -1,4 +1,3 @@
-from copy import deepcopy
 import sys
 
 import pandas as pd
@@ -11,9 +10,7 @@ from src.utils.utils_xarray import get_time_resolution, get_time_offset
 from src.data_processing.bias_correction import BiasCorrection
 
 import dask
-from dask.distributed import Client, LocalCluster
 from dask.diagnostics import ProgressBar
-import xarray as xr
 import time
 import json
 import shutil
@@ -100,9 +97,9 @@ if __name__ == "__main__":
     chunks = {"time": -1, "lat": 20, "lon": 20}
 
     extent = (
-        {'lat_min': 20.8, 'lat_max': 71.8, 'lon_min': -51.7, 'lon_max': 72.7}
+        {"lat_min": 20.8, "lat_max": 71.8, "lon_min": -51.7, "lon_max": 72.7}
         if args.variable == "mrro"
-        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
+        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 34}
     )
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
@@ -115,7 +112,7 @@ if __name__ == "__main__":
         chunks=chunks,
         extent=extent,
         load=False,
-        drop_leap_days=(args.variable != "rsds")
+        drop_leap_days=(args.variable != "rsds"),
     )
 
     climate_data.ds_data = climate_data.ds_data.chunk(chunks)
@@ -153,17 +150,20 @@ if __name__ == "__main__":
         most_common_offset_between = get_time_offset(
             climate_data.ds_data, reanalysis_data.ds_data
         )
-        if most_common_offset_between != pd.Timedelta('0 days 00:00:00'):
+        if most_common_offset_between != pd.Timedelta("0 days 00:00:00"):
             # Subtract 1 hour and 30 minutes from all timesteps using a time offset
             reanalysis_data.ds_data = reanalysis_data.ds_data.assign_coords(
                 time=reanalysis_data.ds_data.time - most_common_offset_between
             )
-            print(f"Subtracted the time offset {most_common_offset_between} from all timesteps of the reanalysis dataset.")
+            print(
+                f"Subtracted the time offset {most_common_offset_between} from all timesteps of the reanalysis dataset."
+            )
 
         # Remove leap days from the reanalysis dataset
         reanalysis_data.ds_data = reanalysis_data.ds_data.sel(
             time=~(
-                (reanalysis_data.ds_data.time.dt.month == 2) & (reanalysis_data.ds_data.time.dt.day == 29)
+                (reanalysis_data.ds_data.time.dt.month == 2)
+                & (reanalysis_data.ds_data.time.dt.day == 29)
             )
         )
 
@@ -192,7 +192,6 @@ if __name__ == "__main__":
         / args.variable
     )
     temp_output_dir.mkdir(exist_ok=True, parents=True)
-
 
     # Perform bias correction
     bias_correction = BiasCorrection(

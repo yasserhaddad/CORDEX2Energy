@@ -25,6 +25,7 @@ from src.conversion_energy.wind import (
 from src.data_processing.load_data import ClimateModelData
 from src.utils.constants import COMPRESSED_ZARR_ENCODING
 from src.utils.utils_xarray import sel_extent
+from src.conversion_energy.aggregate_data import aggregate_data_per_country
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")
@@ -33,8 +34,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("climate_model_chain", type=str, help="Climate model chain.")
     parser.add_argument("climate_scenario", type=str, help="Climate scenario.")
+    parser.add_argument("scope", type=str, help="Scope of the analysis (europe or ch).")
 
     args = parser.parse_args()
+
+    if args.scope not in ["europe", "ch"]:
+        raise ValueError("Scope must be either 'europe' or 'ch'.")
+
     paths = json.load(open(args.paths_file))
 
     path_data_processed = Path(paths["path_data_processed"])
@@ -45,21 +51,30 @@ if __name__ == "__main__":
 
     path_energy = path_data_processed / "energy"
 
+    output_path = (
+        path_energy
+        / "europe"
+    ) if args.scope == "europe" else (
+        path_energy
+        / "ch"
+    )
+    (output_path / "wind_power").mkdir(parents=True, exist_ok=True)
+
     dask.config.set(num_workers=15, scheduler="processes")
     dask.config.set({"array.chunk-size": "500MiB"})
 
     time_start = time.time()
     print("Computing smoothed power curves...")
-    power_curves_europe_smoothed = {
+    power_curves_smoothed = {
         turbine: compute_smooth_power_curve(turbine) for turbine in EUROPE_TURBINES
-    }
-    power_curves_ch_smoothed = {
+    } if args.scope == "europe" else {
         turbine: compute_smooth_power_curve(turbine) for turbine in CH_TURBINES
     }
 
     print("Loading wind data...")
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-    extent_ch = {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
+    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30} if args.scope == "europe" else {
+        "lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5
+    }
     chunks_bc = {
         "time": 2920,
         "lat": 128,
@@ -69,42 +84,46 @@ if __name__ == "__main__":
     ds_wind_100m = ClimateModelData(
         path_data_processed
         / "cordex_processed"
-        / "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp85"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "bias_corrected"
         / "3hr"
         / "wind100m.zarr",
-        extent=extent_ch,
+        extent=extent,
         chunks=chunks_bc,
     )
 
     ds_wind_150m = ClimateModelData(
         path_data_processed
         / "cordex_processed"
-        / "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp85"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "bias_corrected"
         / "3hr"
         / "wind150m.zarr",
-        extent=extent_ch,
+        extent=extent,
         chunks=chunks_bc,
     )
 
     print("Computing wind speed exponent...")
+    da_alpha = compute_power_law_exponent(
+        ds_wind_100m.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
+    )
     with ProgressBar(dt=60):
-        da_alpha = compute_power_law_exponent(
-            ds_wind_100m.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
-        ).compute()
+        da_alpha = da_alpha.compute() if args.scope == "ch" else da_alpha.persist()
 
     ds_wind_power = []
 
-    for turbine_type in CH_TURBINES:
+    turbines = EUROPE_TURBINES if args.scope == "europe" else CH_TURBINES
+    hub_heights = EUROPE_HUB_HEIGHTS if args.scope == "europe" else CH_HUB_HEIGHTS
+
+    for turbine_type in turbines:
         print(f"Computing wind power for {turbine_type}")
         da_wind_hub_height = extrapolate_wind_speed(
-            ds_wind_100m.ds_data.wind100m, 100, CH_HUB_HEIGHTS[turbine_type], da_alpha
+            ds_wind_100m.ds_data.wind100m, 100, hub_heights[turbine_type], da_alpha
         )
         ds_wind_power.append(
             compute_wind_power(
                 da_wind_hub_height,
-                power_curves_ch_smoothed[turbine_type][
+                power_curves_smoothed[turbine_type][
                     turbine_type.replace("/", "_")
                 ],
                 turbine_type.replace("/", "_"),
@@ -116,7 +135,41 @@ if __name__ == "__main__":
     # Combine all wind power data arrays into a single dataset with each turbine type as a separate data variable
     print("Computing all wind power outputs...")
     with ProgressBar(dt=60):
-        ds_wind_power = xr.merge(ds_wind_power).compute()
+        if args.scope == "ch":
+            ds_wind_power = xr.merge(ds_wind_power).compute()
+        else:
+            ds_wind_power = xr.merge(ds_wind_power).persist()
+
+
+    if args.scope == "europe":
+        with ProgressBar(dt=60):
+            ds_wind_power_agg = aggregate_data_per_country(
+                ds_wind_power,
+                method="median_and_better",
+                offshore=False,
+            ).compute()
+            ds_wind_power_agg_offshore = aggregate_data_per_country(
+                ds_wind_power,
+                method="median_and_better",
+                offshore=True,
+                path_eez_file=path_data_processed / "maps" / "eez_v12" / "eez_v12.shp"
+            ).compute()
+
+
+    if args.scope == "europe":
+        output_path = (
+            output_path
+            / "wind_power"
+            / f"wind_power_{args.climate_model_chain}_{args.climate_scenario}_{turbine_type.replace('/', '_')}.nc"
+        )
+        ds_wind_power_agg.to_netcdf(output_path, mode="w")
+
+        output_path_offshore = (
+            output_path
+            / "wind_power"
+            / f"wind_power_offshore_{args.climate_model_chain}_{args.climate_scenario}_{turbine_type.replace('/', '_')}.nc"
+        )
+        ds_wind_power_agg_offshore.to_netcdf(output_path_offshore, mode="w")
 
     zarr_encoding = {
         var: {
@@ -125,12 +178,12 @@ if __name__ == "__main__":
         }
         for var in ds_wind_power.data_vars
     }
-
-    # Save the combined dataset to a file
     output_path = (
-        path_energy
-        / "ch"
+        output_path
+        / "wind_power"
         / f"wind_power_{args.climate_model_chain}_{args.climate_scenario}.zarr"
     )
     ds_wind_power.to_zarr(output_path, mode="w", encoding=zarr_encoding)
+
+
     print("Time to compute wind power for all turbines: ", (time.time() - time_start) / 60, " minutes.")

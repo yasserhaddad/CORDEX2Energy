@@ -1,7 +1,50 @@
+from pathlib import Path
 import geopandas as gpd
 import numpy as np
+import regionmask
 import xarray as xr
 from shapely.geometry import Point
+
+EUROPEAN_COUNTRIES = [
+    "Albania",
+    "Austria",
+    "Bosnia and Herzegovina",
+    "Belgium",
+    "Bulgaria",
+    "Switzerland",
+    "Czech Republic",
+    "Germany",
+    "Denmark",
+    "Estonia",
+    "Spain",
+    "Finland",
+    "France",
+    "Greece",
+    "Croatia",
+    "Hungary",
+    "Ireland",
+    "Italy",  # several bidding zones
+    "Lithuania",
+    "Latvia",
+    "Montenegro",
+    "Macedonia",
+    "Netherlands",
+    "Norway",  # several bidding zones
+    "Poland",
+    "Portugal",
+    "Romania",
+    "Serbia",
+    "Sweden",  # several bidding zones
+    "Slovenia",
+    "Slovakia",
+    "United Kingdom",
+]
+
+COUNTRIES_NATURAL_EARTH_TO_UPDATE = {
+    "Czechia": "Czech Republic",
+    "Bosnia and Herz.": "Bosnia and Herzegovina",
+    "North Macedonia": "Macedonia",
+}
 
 
 def match_point_to_unique_polygon(
@@ -77,3 +120,64 @@ def create_geodataframe_climate_grid(ds_climate_data: xr.Dataset) -> gpd.GeoData
     gdf_climate_grid["lon"] = [point.x for point in gdf_climate_grid.geometry]
 
     return gdf_climate_grid
+
+
+def create_country_mask(ds: xr.Dataset) -> xr.DataArray:
+    # Create a mask for the countries
+    countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_10
+    mask_countries = countries.mask(ds, wrap_lon=True)
+    mask_countries.name = "country"
+    mask_countries.attrs["long_name"] = "Country"
+    countries = countries.to_dataframe()
+    countries["names"] = countries["names"].apply(lambda x: COUNTRIES_NATURAL_EARTH_TO_UPDATE.get(x, x))
+    return mask_countries, countries
+
+
+def process_eez_file(path_eez_file: Path) -> gpd.GeoDataFrame:
+    gdf_eez = gpd.read_file(path_eez_file)
+    gdf_eez = gdf_eez.to_crs("EPSG:4326")
+    gdf_eez = gdf_eez[gdf_eez.GEONAME.str.contains("Exclusive")]
+    gdf_eez = gdf_eez[gdf_eez["TERRITORY1"].isin(EUROPEAN_COUNTRIES)]
+    return gdf_eez
+
+def create_country_offshore_mask(ds: xr.Dataset, path_eez_file: Path) -> xr.DataArray:
+    # Create a mask for the countries
+    gdf_eez = process_eez_file(path_eez_file)
+    eez_regions = regionmask.Regions(
+        name="EEZs",
+        numbers=range(len(gdf_eez)),
+        names=gdf_eez["TERRITORY1"],
+        outlines=gdf_eez.geometry.values,
+    )
+    mask_countries = eez_regions.mask(ds, wrap_lon=True)
+    mask_countries.name = "country"
+    mask_countries.attrs["long_name"] = "Country"
+    return mask_countries, eez_regions.to_dataframe()
+
+
+def aggregate_data_per_country(ds: xr.Dataset, method: str = "mean", offshore: bool = False, path_eez_file: Path = None) -> xr.Dataset:
+    mask, countries = create_country_offshore_mask(ds, path_eez_file) if offshore else create_country_mask(ds)
+    mask = mask.fillna(-1)
+
+    if method not in ["mean", "median_and_better"]:
+        raise ValueError(f"Method '{method}' is not supported. Use 'mean' or 'median_and_better'.")
+    if method == "mean":
+        ds = ds.groupby(mask).mean(dim=["lat", "lon"], skipna=True)
+    elif method == "median_and_better":
+        mean_time = ds.mean(dim="time", skipna=True).compute()
+        ref = mean_time.groupby(mask).median(skipna=True)  # median per country
+        ref_broadcasted = xr.merge([xr.apply_ufunc(
+            lambda country_id: ref[var].sel(country=country_id),
+            mask,
+            vectorize=True,
+            output_dtypes=[float],
+        ).rename(var) for var in ref.data_vars])
+        ds = ds.where(mean_time >= ref_broadcasted).groupby(mask).mean(
+            dim=["lat", "lon"], skipna=True
+        )  # only average over locations that at least as good as the median on average
+
+    ds = ds.sel(country=ds["country"].values[ds["country"].values != -1])
+    ds["country"] = [countries.loc[number, "names"] for number in ds["country"].values]
+    ds = ds.sel(country=[country for country in ds["country"].values if country in EUROPEAN_COUNTRIES])
+
+    return ds

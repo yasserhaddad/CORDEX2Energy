@@ -91,7 +91,7 @@ if __name__ == "__main__":
         }
         for var in ds_huss.data_vars
     }
-    ds_huss.to_zarr(bias_corrected_data_dir / "huss_derived.zarr",
+    ds_huss.to_zarr(bias_corrected_data_dir / "huss.zarr",
                     encoding=zarr_encoding,
                     mode="w")
 

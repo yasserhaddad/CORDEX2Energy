@@ -7,14 +7,12 @@ from pathlib import Path
 import dask
 import pandas as pd
 import xarray as xr
-from dask.diagnostics import ProgressBar
 
 sys.path.append("../..")
 
 from src.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_for_grid,
-    compute_pv_for_pixel_all_timesteps,
 )
 from src.data_processing.load_data import ClimateModelData
 from src.utils.constants import COMPRESSED_ZARR_ENCODING
@@ -72,6 +70,7 @@ if __name__ == "__main__":
         / "tas.zarr",
         extent=extent_ch,
     )
+
     ds_sfcWind_bc = ClimateModelData(
         path_data_processed
         / "cordex_processed"
@@ -124,13 +123,13 @@ if __name__ == "__main__":
     azimuths = {"E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "N": 0}
     tilts = [3, 8, 15, 25, 35, 45, 60, 80, 90]
 
-    azimuths_subset = {"E": 90, "S": 180, "W": 270, "N": 0}
-    tilts_subset = [25, 35, 45]
+    # azimuths_subset = {"E": 90, "S": 180, "W": 270, "N": 0}
+    # tilts_subset = [25, 35, 45]
     datasets = []
 
     pv_step_start = time.time()
-    for direction, azimuth in azimuths_subset.items():
-        for tilt in tilts_subset:
+    for direction, azimuth in azimuths.items():
+        for tilt in tilts:
             step_start = time.time()
             datasets.append(
                 compute_pv_for_grid(
@@ -143,6 +142,7 @@ if __name__ == "__main__":
                     da_altitude=ds_orog.orog,
                     num_workers=15,
                 ).rename({"ac_power": f"tilt_{tilt}_azimuth_{direction}"})
+                / NORMALISED_ROOFTOP_PV_CONFIGURATION["module_parameters"]["pdc0"]
             )
             print(
                 f"Computation time for tilt {tilt}, azimuth {direction}: {(time.time() - step_start) / 60:.2f} minutes"
@@ -167,52 +167,11 @@ if __name__ == "__main__":
     output_path = (
         path_energy
         / "ch"
-        / "solar"
+        / "pv"
         / f"pv_{args.climate_model_chain}_{args.climate_scenario}.zarr"
     )
     ds_pv.to_zarr(output_path, mode="w", encoding=zarr_encoding)
     print(f"PV data saved to {output_path}")
     print(f"PV data saving time: {(time.time() - step_start) / 60:.2f} minutes")
 
-    del ds_pv, datasets
-    # Compute PV for one year for all combinations of tilt and azimuth
-    step_start = time.time()
-    datasets = []
-    for direction, azimuth in azimuths.items():
-        for tilt in tilts:
-            datasets.append(
-                compute_pv_for_grid(
-                    ds_rsds_bc.ds_data.rsds.sel(time="2020"),
-                    ds_tas_bc.ds_data.tas.sel(time="2020"),
-                    ds_sfcWind_bc.ds_data.sfcWind.sel(time="2020"),
-                    tilt=tilt,
-                    azimuth=azimuth,
-                    pv_configuration=NORMALISED_ROOFTOP_PV_CONFIGURATION,
-                    da_altitude=ds_orog.orog,
-                    num_workers=15,
-                ).rename({"ac_power": f"tilt_{tilt}_azimuth_{direction}"})
-            )
-    print(f"PV computation time: {(time.time() - step_start) / 60:.2f} minutes")
-    step_start = time.time()
-    ds_pv = xr.merge(datasets)
-    print(f"Dataset merging time: {(time.time() - step_start) / 60:.2f} minutes")
-    step_start = time.time()
-    # Save the combined dataset to a file
-    zarr_encoding = {
-        var: {
-            "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-            "chunks": tuple(chunks_bc.values()),
-        }
-        for var in ds_pv.data_vars
-    }
-    output_path = (
-        path_energy
-        / "ch"
-        / "solar"
-        / f"pv_sensitivity_test_{args.climate_model_chain}_{args.climate_scenario}.zarr"
-    )
-    ds_pv.to_zarr(output_path, mode="w", encoding=zarr_encoding)
-    print(f"PV data saved to {output_path}")
-    print(f"PV data saving time: {(time.time() - step_start) / 60:.2f} minutes")
-    del ds_pv, datasets
     print("Total time: ", (time.time() - time_start) / 60, "minutes")

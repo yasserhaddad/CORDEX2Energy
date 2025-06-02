@@ -594,7 +594,13 @@ def sel_extent(ds: Union[xr.Dataset, xr.DataArray], extent: dict) -> Union[xr.Da
     Union[xr.Dataset, xr.DataArray]
         The selected subset of the input dataset or data array.
     """
-    return ds.sel(
-        lat=slice(extent["lat_min"], extent["lat_max"]),
-        lon=slice(extent["lon_min"], extent["lon_max"]),
-    )
+    if ds.lat[0] > ds.lat[-1]:  # Check if latitude is decreasing
+        return ds.sel(
+            lat=slice(extent["lat_max"], extent["lat_min"]),
+            lon=slice(extent["lon_min"], extent["lon_max"]),
+        )
+    else:  # Latitude is increasing
+        return ds.sel(
+            lat=slice(extent["lat_min"], extent["lat_max"]),
+            lon=slice(extent["lon_min"], extent["lon_max"]),
+        )

@@ -30,8 +30,11 @@ if __name__ == "__main__":
     parser.add_argument("temp_res", type=str, help="Temporal resolution.")
 
     args = parser.parse_args()
-    paths = json.load(open(args.paths_file))
 
+    dask.config.set(num_workers=15, scheduler="processes")
+    dask.config.set({"array.chunk-size": "500MiB"})
+
+    paths = json.load(open(args.paths_file))
     path_data_processed = Path(paths["path_data_processed"])
 
     bias_corrected_data_dir = (
@@ -41,11 +44,17 @@ if __name__ == "__main__":
         / "bias_corrected"
     )
 
+    bc_chunks = {
+        "time": 2920,
+        "lat": 128,
+        "lon": 128,
+    }
+
     for file in (bias_corrected_data_dir / args.temp_res).glob("*.zarr"):
         print(f"Processing {file.name}")
         with ProgressBar(dt=10):
             ds = aggregate_to_daily(
-                xr.open_zarr(file)
+                xr.open_zarr(file, chunks=bc_chunks)
             ).compute()
 
             output_path = bias_corrected_data_dir / "day" / file.name

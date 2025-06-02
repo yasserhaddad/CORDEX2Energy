@@ -10,7 +10,6 @@ from pvlib.location import Location
 from pvlib.modelchain import ModelChain
 from pvlib.pvsystem import PVSystem
 from pvlib.temperature import TEMPERATURE_MODEL_PARAMETERS
-from multiprocessing import Pool
 
 DEFAULT_PV_CONFIGURATION = {
     "temperature_model_parameters": TEMPERATURE_MODEL_PARAMETERS["sapm"][
@@ -210,9 +209,9 @@ def compute_pv_for_pixel_all_timesteps(
         Estimated AC power output over time for the given location.
     """
     # Extract data arrays for the current grid point
-    rsds = da_radiation.sel(lat=lat, lon=lon).values
-    temperature = da_temperature.sel(lat=lat, lon=lon).values
-    wind_speed = da_wind_speed.sel(lat=lat, lon=lon).values
+    rsds = da_radiation.sel(lat=lat, lon=lon).load().values
+    temperature = da_temperature.sel(lat=lat, lon=lon).load().values
+    wind_speed = da_wind_speed.sel(lat=lat, lon=lon).load().values
     altitude = da_altitude.sel(lat=lat, lon=lon).values if da_altitude is not None else None
     times = pd.to_datetime(da_radiation["time"].values)
 
@@ -371,3 +370,97 @@ def compute_pv_for_grid(
     da_pv = xr.combine_by_coords(results)
 
     return da_pv
+
+
+class PVOutput:
+    def __init__(self, pv_configuration: dict = DEFAULT_PV_CONFIGURATION, system_loss: float = 0.14):
+        self.pv_configuration = pv_configuration
+        self.system_loss = 0.14
+
+    def compute_pv_np(
+        self,
+        rsds: np.ndarray,
+        temp: np.ndarray,
+        wind: np.ndarray,
+        time: np.ndarray,
+        lat: float,
+        lon: float,
+        tilt: float,
+        azimuth: float,
+        altitude: float,
+    ) -> np.ndarray:
+        """
+        Compute PV output for one pixel using NumPy arrays.
+        """
+        time_index = pd.to_datetime(time)
+
+        location = Location(lat, lon, altitude=altitude)
+        system = PVSystem(
+            module_parameters=self.pv_configuration["module_parameters"],
+            inverter_parameters=self.pv_configuration["inverter_parameters"],
+            racking_model=self.pv_configuration["racking_model"],
+            temperature_model_parameters=self.pv_configuration["temperature_model_parameters"],
+            surface_tilt=tilt,
+            surface_azimuth=azimuth,
+        )
+        mc = ModelChain(system, location, aoi_model="martin_ruiz")
+
+        solar_position = location.get_solarposition(time_index)
+        dni_dhi = erbs(rsds, solar_position["zenith"], time_index)
+        poa_irrad = pvlib.irradiance.get_total_irradiance(
+            tilt,
+            azimuth,
+            dni=dni_dhi["dni"],
+            ghi=rsds,
+            dhi=dni_dhi["dhi"],
+            solar_zenith=solar_position["zenith"],
+            solar_azimuth=solar_position["azimuth"],
+        )
+        module_temp = pvlib.temperature.sapm_cell(
+            poa_irrad["poa_global"],
+            temp,
+            wind,
+            **self.pv_configuration["temperature_model_parameters"],
+        )
+
+        weather = pd.DataFrame({
+            "ghi": rsds,
+            "dni": dni_dhi["dni"],
+            "dhi": dni_dhi["dhi"],
+            "temp_air": temp,
+            "wind_speed": wind,
+            "temp_module": module_temp,
+        })
+
+        mc.run_model(weather)
+        return mc.results.ac.values * (1 - self.system_loss)
+
+    def compute_pv_xarray(
+        self,
+        da_radiation: xr.DataArray,
+        da_temperature: xr.DataArray,
+        da_wind: xr.DataArray,
+        da_altitude: xr.DataArray,
+        tilt: float,
+        azimuth: float,
+    ) -> xr.DataArray:
+
+        time = da_radiation["time"]
+        lat = da_radiation.lat
+        lon = da_radiation.lon
+
+        return xr.apply_ufunc(
+            self.compute_pv_np,
+            da_radiation,
+            da_temperature,
+            da_wind,
+            time,
+            lat,
+            lon,
+            tilt,
+            azimuth,
+            da_altitude,
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        ).rename("ac_power")
