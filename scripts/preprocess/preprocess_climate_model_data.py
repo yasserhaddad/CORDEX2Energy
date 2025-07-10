@@ -101,9 +101,9 @@ if __name__ == "__main__":
         f"\tRemapping time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."
     )
 
-    adjusted_timesteps = get_adjusted_timesteps(
-        path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
-    )
+    # adjusted_timesteps = get_adjusted_timesteps(
+    #     path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
+    # )
 
     adjusted_timesteps = {
         "original_timesteps": pd.date_range("01-01-1991 00:00", "12-31-2099 00:00", freq="D"),

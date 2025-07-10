@@ -25,6 +25,7 @@ EUROPEAN_COUNTRIES = [
     "Ireland",
     "Italy",  # several bidding zones
     "Lithuania",
+    "Luxembourg",
     "Latvia",
     "Montenegro",
     "Macedonia",
@@ -125,7 +126,7 @@ def create_geodataframe_climate_grid(ds_climate_data: xr.Dataset) -> gpd.GeoData
 def create_country_mask(ds: xr.Dataset) -> xr.DataArray:
     # Create a mask for the countries
     countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_10
-    mask_countries = countries.mask(ds, wrap_lon=True)
+    mask_countries = countries.mask(ds)
     mask_countries.name = "country"
     mask_countries.attrs["long_name"] = "Country"
     countries = countries.to_dataframe()

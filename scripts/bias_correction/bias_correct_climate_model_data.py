@@ -99,7 +99,7 @@ if __name__ == "__main__":
     extent = (
         {"lat_min": 20.8, "lat_max": 71.8, "lon_min": -51.7, "lon_max": 72.7}
         if args.variable == "mrro"
-        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 34}
+        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 35}
     )
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
@@ -182,6 +182,24 @@ if __name__ == "__main__":
         mask_nan = climate_data.ds_data[args.variable].notnull()
         climate_data.ds_data = climate_data.ds_data.fillna(0)
         reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(0)
+
+    # Quick check for NaN values along spatial dimensions in the first time step
+    has_nan = (
+        climate_data.ds_data[args.variable].isel(time=0).isnull().any().compute().item()
+    )
+    if has_nan:
+        # fill NaN values along spatial dimensions
+        print(
+            f"NaN values found in the first time step of {args.variable}. Filling NaN values along spatial dimensions."
+        )
+        # Forward fill and backward fill along lat and lon dimensions
+        climate_data.ds_data = (
+            climate_data.ds_data.ffill(dim="lat")
+            .ffill(dim="lon")
+            .bfill(dim="lat")
+            .bfill(dim="lon")
+        )
+
 
     temp_output_dir = (
         path_data_processed

@@ -82,7 +82,7 @@ def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_b
     )
 
     countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_10
-    mask_countries_worldpop = countries.mask(da_worldpop_coarse, wrap_lon=True)
+    mask_countries_worldpop = countries.mask(da_worldpop_coarse)
     da_worldpop_coarse = normalize_population_data(
         da_worldpop_coarse, mask_countries_worldpop
     ).where(da_worldpop_coarse > 0, np.nan)

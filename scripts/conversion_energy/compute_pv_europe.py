@@ -41,7 +41,12 @@ if __name__ == "__main__":
 
     path_energy = path_data_processed / "energy"
 
-    output_path_solar = path_energy / "europe" / "pv" / f"{args.climate_model_chain}_{args.climate_scenario}"
+    output_path_solar = (
+        path_energy
+        / "europe"
+        / "pv"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+    )
     output_path_solar.mkdir(parents=True, exist_ok=True)
 
     output_path_temp_solar = (
@@ -66,7 +71,8 @@ if __name__ == "__main__":
         "lon": 128,
     }
 
-    time_slices = [(2018, 2030), (2031, 2040), (2041, 2052)]
+    step = 15
+    time_slices = [(start, min(start + step - 1, 2099)) for start in range(1991, 2100, step)]
     for start_year, end_year in time_slices:
         print(f"Processing data for {start_year}-{end_year}")
         time_slice = slice(str(start_year), str(end_year))
@@ -246,14 +252,14 @@ if __name__ == "__main__":
             output_path_temp_solar.glob(
                 f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_*.nc"
             ),
-            combine="by_coords"
+            combine="by_coords",
         )
 
         output_path_agg = (
             output_path_solar
             / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}.nc"
         )
-        ds_pv_agg.to_netcdf(output_path_agg, mode="w")
+        ds_pv_agg.compute().to_netcdf(output_path_agg, mode="w")
         del ds_pv_agg
 
     shutil.rmtree(output_path_temp_solar)

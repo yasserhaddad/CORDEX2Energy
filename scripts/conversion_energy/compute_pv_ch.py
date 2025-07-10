@@ -120,11 +120,11 @@ if __name__ == "__main__":
     print(f"Data loading time: {(time.time() - step_start) / 60:.2f} minutes")
 
     step_start = time.time()
-    azimuths = {"E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "N": 0}
-    tilts = [3, 8, 15, 25, 35, 45, 60, 80, 90]
+    # azimuths = {"E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "N": 0}
+    # tilts = [3, 8, 15, 25, 35, 45, 60, 80, 90]
 
-    # azimuths_subset = {"E": 90, "S": 180, "W": 270, "N": 0}
-    # tilts_subset = [25, 35, 45]
+    azimuths = {"E": 90, "S": 180, "W": 270, "N": 0}
+    tilts = [25, 35, 45]
     datasets = []
 
     pv_step_start = time.time()
