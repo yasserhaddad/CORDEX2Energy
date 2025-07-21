@@ -2,6 +2,7 @@ import subprocess
 
 REMAP_TYPE_MAP = {
     "conservative": "remapcon",
+    "conservative2": "remapcon2",
     "bilinear": "remapbil",
     "bicubic": "remapbic",
     "nearest_neighbor": "remapnn",
@@ -9,7 +10,7 @@ REMAP_TYPE_MAP = {
 }
 
 def cdo_remap(
-    input_file_path: str, output_file_path: str, remap_type: str, target_grid_path: str
+    input_file_path: str, output_file_path: str, remap_type: str, target_grid_path: str, input_grid_path: str = None
 ) -> None:
     """
     Remap the input file to the target grid using CDO.
@@ -39,6 +40,12 @@ def cdo_remap(
     cdo_command = [
         "cdo",
         f"{cdo_remap_command},{target_grid_path}",
+    ]
+
+    if input_grid_path:
+        cdo_command.append(f"-setgrid,{input_grid_path}")
+
+    cdo_command += [
         input_file_path,
         output_file_path,
     ]

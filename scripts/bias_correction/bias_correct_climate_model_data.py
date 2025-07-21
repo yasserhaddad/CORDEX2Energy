@@ -5,7 +5,13 @@ import pandas as pd
 sys.path.append("../..")
 
 from src.data_processing.load_data import ClimateModelData, ClimateReanalysisData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import (
+    COMPRESSED_ZARR_ENCODING,
+    EXTENT_BC,
+    EXTENT_BC_MRRO,
+    REFERENCE_PERIOD,
+    FUTURE_PERIOD,
+)
 from src.utils.utils_xarray import get_time_resolution, get_time_offset
 from src.data_processing.bias_correction import BiasCorrection
 
@@ -66,6 +72,7 @@ if __name__ == "__main__":
     paths = json.load(open(args.paths_file))
 
     path_data_processed = Path(paths["path_data_processed"])
+    path_data_temporary = Path(paths["path_data_temporary"])
 
     time_start = time.time()
     client = None
@@ -96,11 +103,7 @@ if __name__ == "__main__":
     # Load data
     chunks = {"time": -1, "lat": 20, "lon": 20}
 
-    extent = (
-        {"lat_min": 20.8, "lat_max": 71.8, "lon_min": -51.7, "lon_max": 72.7}
-        if args.variable == "mrro"
-        else {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 35}
-    )
+    extent = EXTENT_BC_MRRO if args.variable == "mrro" else EXTENT_BC
     climate_data = ClimateModelData(
         regridded_cordex_var_path / f"{args.variable}.zarr",
         chunks=chunks,
@@ -183,14 +186,17 @@ if __name__ == "__main__":
         climate_data.ds_data = climate_data.ds_data.fillna(0)
         reanalysis_data.ds_data = reanalysis_data.ds_data.fillna(0)
 
-    # Quick check for NaN values along spatial dimensions in the first time step
+    # Quick check for NaN values along borders in the first time step
     has_nan = (
-        climate_data.ds_data[args.variable].isel(time=0).isnull().any().compute().item()
-    )
+        climate_data.ds_data[args.variable].isel(time=0).isel(lat=0).isnull().any() |
+        climate_data.ds_data[args.variable].isel(time=0).isel(lat=-1).isnull().any() |
+        climate_data.ds_data[args.variable].isel(time=0).isel(lon=0).isnull().any() |
+        climate_data.ds_data[args.variable].isel(time=0).isel(lon=-1).isnull().any()
+    ).compute().item()
     if has_nan:
         # fill NaN values along spatial dimensions
         print(
-            f"NaN values found in the first time step of {args.variable}. Filling NaN values along spatial dimensions."
+            f"NaN values found in the borders of the first time step of {args.variable}. Filling NaN values along spatial dimensions."
         )
         # Forward fill and backward fill along lat and lon dimensions
         climate_data.ds_data = (
@@ -199,10 +205,15 @@ if __name__ == "__main__":
             .bfill(dim="lat")
             .bfill(dim="lon")
         )
-
+        reanalysis_data.ds_data = (
+            reanalysis_data.ds_data.ffill(dim="lat")
+            .ffill(dim="lon")
+            .bfill(dim="lat")
+            .bfill(dim="lon")
+        )
 
     temp_output_dir = (
-        path_data_processed
+        path_data_temporary
         / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "temp"
@@ -215,8 +226,8 @@ if __name__ == "__main__":
     bias_correction = BiasCorrection(
         climate_data,
         reanalysis_data,
-        reference_period=("1991", "2020"),
-        future_period=("2021", "2100"),
+        reference_period=REFERENCE_PERIOD,
+        future_period=FUTURE_PERIOD,
         bias_correction_method=args.bias_correction_method,
         client=client,
     )

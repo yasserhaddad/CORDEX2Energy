@@ -9,11 +9,20 @@ import argparse
 import pandas as pd
 from pathlib import Path
 from time import time
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO
 from src.data_processing.load_data import ClimateModelData
 from src.utils.cdo_commands import cdo_remap
 from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
 from src.utils.utils_load_data import get_raw_cordex_data_paths
+from src.data_processing.test_climate_data import (
+    has_duplicate_coords,
+    has_identical_random_timesteps,
+    is_time_sorted,
+)
+
+
+def extract_year(path_cordex: Path) -> int:
+    return int(path_cordex.stem.split("_")[-1][:4])
 
 
 def get_adjusted_timesteps(
@@ -49,10 +58,14 @@ if __name__ == "__main__":
     path_data_adjusted_cordex = Path(paths["path_data_adjusted_cordex"])
     path_data_personal_cordex = Path(paths["path_data_personal"]) / "cordex" / "EUR-11"
     path_data_temporary = Path(paths["path_data_temporary"])
-    climate_grid_file = "g010_MERIT_2.txt" if args.variable == "mrro" else "grid_EUR11_lonlat_griddes.txt"
+    climate_grid_file = (
+        "g010_MERIT_2.txt"
+        if args.variable == "mrro"
+        else "grid_EUR11_lonlat_griddes.txt"
+    )
 
     time_start = time()
-    cordex_tas, cordex_tas_hist = get_raw_cordex_data_paths(
+    cordex_var, cordex_var_hist = get_raw_cordex_data_paths(
         path_data_personal_cordex
         if args.variable.startswith("wind")
         else path_data_cordex,
@@ -74,19 +87,25 @@ if __name__ == "__main__":
     (temp_output_dir / "hist").mkdir(parents=True, exist_ok=True)
     (temp_output_dir / "future").mkdir(parents=True, exist_ok=True)
     print("Remapping historical data.")
-    for sim_path in cordex_tas_hist.glob("*.nc"):
+    for sim_path in cordex_var_hist.glob("*.nc"):
         if (temp_output_dir / "hist" / sim_path.name).exists():
             continue
         print(sim_path.name)
+        if extract_year(sim_path) > 2006:
+            print("There's future data in historical directory. Skipping...")
+            continue
         cdo_remap(
             str(sim_path),
             str(temp_output_dir / "hist" / sim_path.name),
             "conservative",
             path_data_processed / "climate_grids" / climate_grid_file,
+            path_data_processed / "climate_grids" / "grid_cnrm_453x453.txt"
+            if "CNRM-ALADIN63" in args.climate_model_chain
+            else None,
         )
     print("Historical data remapped.")
     print("Remapping future data.")
-    for sim_path in cordex_tas.glob("*.nc"):
+    for sim_path in cordex_var.glob("*.nc"):
         if (temp_output_dir / "future" / sim_path.name).exists():
             continue
         print(sim_path.name)
@@ -95,6 +114,9 @@ if __name__ == "__main__":
             str(temp_output_dir / "future" / sim_path.name),
             "conservative",
             path_data_processed / "climate_grids" / climate_grid_file,
+            path_data_processed / "climate_grids" / "grid_cnrm_453x453.txt"
+            if "CNRM-ALADIN63" in args.climate_model_chain
+            else None,
         )
 
     print(
@@ -105,15 +127,14 @@ if __name__ == "__main__":
     #     path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
     # )
 
-    adjusted_timesteps = {
-        "original_timesteps": pd.date_range("01-01-1991 00:00", "12-31-2099 00:00", freq="D"),
-        "start_year": 1991,
-    }
+    # adjusted_timesteps = {
+    #     "original_timesteps": pd.date_range("01-01-1991 00:00", "12-31-2100 00:00", freq="D"),
+    #     "start_year": 1991,
+    # }
+    adjusted_timesteps = None
 
     chunks = None
-    extent = (
-        {'lat_min': 20.8, 'lat_max': 71.8, 'lon_min': -51.7, 'lon_max': 72.7}
-        if args.variable == "mrro" else None)
+    extent = EXTENT_BC_MRRO if args.variable == "mrro" else None
 
     climate_data = ClimateModelData(
         temp_output_dir / "future",
@@ -124,6 +145,17 @@ if __name__ == "__main__":
         extent=extent,
         load=False,
     )
+
+    if not is_time_sorted(climate_data.ds_data):
+        print("Time coordinate is not sorted. Sorting now...")
+        climate_data.ds_data = climate_data.ds_data.sortby("time")
+
+    if has_duplicate_coords(climate_data.ds_data)["time"]:
+        print("Dataset contains duplicate time coordinates. Removing duplicates...")
+        climate_data.ds_data = climate_data.ds_data.drop_duplicates(dim="time")
+
+    if has_identical_random_timesteps(climate_data.ds_data):
+        print("Dataset contains identical random timesteps.")
 
     output_path = (
         path_data_processed

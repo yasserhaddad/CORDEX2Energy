@@ -10,7 +10,7 @@ mkdir -p "logs/${model}_${scenario}/"
 # Loop through each height and scenario and run the script
 for height in "${heights[@]}"; do
     echo "Processing model: $model, scenario: $scenario and height: $height"
-    python -u get_climate_model_wind_speed.py "$paths_file" "$model" "$scenario" "$height" "$temp_res" 2>&1 | tee "logs/${model}_${scenario}/get_climate_model_wind_speeds_${height}.log"
+    python -u compute_climate_model_wind_speed.py "$paths_file" "$model" "$scenario" "$height" "$temp_res" 2>&1 | tee "logs/${model}_${scenario}/get_climate_model_wind_speeds_${height}.log"
 done
 
 echo "All heights and scenarios processed."

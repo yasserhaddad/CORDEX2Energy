@@ -604,3 +604,29 @@ def sel_extent(ds: Union[xr.Dataset, xr.DataArray], extent: dict) -> Union[xr.Da
             lat=slice(extent["lat_min"], extent["lat_max"]),
             lon=slice(extent["lon_min"], extent["lon_max"]),
         )
+
+def tile_dataset_to_target_time(
+    ds_var: Union[xr.Dataset, xr.DataArray],
+    target_time: xr.DataArray
+) -> Union[xr.Dataset, xr.DataArray]:
+    """
+    Tile the values of a Dataset or DataArray to match the length and time coordinate of target_time.
+
+    Parameters
+    ----------
+    ds_var : xarray.Dataset or xarray.DataArray
+        Dataset or DataArray with a 'time' dimension.
+    target_time : xarray.DataArray
+        The time coordinate to match.
+
+    Returns
+    -------
+    xarray.Dataset or xarray.DataArray
+        Values tiled and trimmed to match the target_time, with time coordinate assigned.
+    """
+    n_target = target_time.size
+    n_var = ds_var.sizes["time"]
+    n_repeats = int(np.ceil(n_target / n_var))
+    ds_tiled = xr.concat([ds_var] * n_repeats, dim="time").isel(time=slice(0, n_target))
+    ds_tiled = ds_tiled.assign_coords(time=target_time)
+    return ds_tiled

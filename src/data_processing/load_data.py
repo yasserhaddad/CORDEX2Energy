@@ -20,6 +20,7 @@ class ClimateModelData:
         chunks: Dict[str, int] = None,
         extent: Dict[str, float] = None,
         reordered_coords: List[str] = None,
+        check_calendar: bool = True,
         drop_leap_days: bool = True,
         load: bool = False,
     ):
@@ -37,13 +38,16 @@ class ClimateModelData:
         self.drop_leap_days = drop_leap_days
 
         if path_climate_data_historical is not None:
+            # Load historical data
+            ds_hist = xr.open_mfdataset(
+                path_climate_data_historical.glob("*"), chunks=chunks
+            ).sortby("time")
+            # Select only timesteps not present in self.ds_data
+            new_times = ds_hist.time.to_index().difference(self.ds_data.time.to_index())
+            ds_hist = ds_hist.sel(time=new_times)
+            # Concatenate along time
             self.ds_data = xr.concat(
-                [
-                    xr.open_mfdataset(
-                        path_climate_data_historical.glob("*"), chunks=chunks
-                    ).sortby("time"),
-                    self.ds_data,
-                ],
+                [ds_hist, self.ds_data],
                 dim="time",
             )
 
@@ -67,6 +71,10 @@ class ClimateModelData:
         if reordered_coords is not None:
             self.ds_data = xr_reorder_coords(self.ds_data, reordered_coords)
 
+        if check_calendar and hasattr(self.ds_data.time, 'encoding'):
+            calendar = self.ds_data.time.encoding.get('calendar', None)
+            if calendar not in [None, 'proleptic_gregorian', 'standard', 'gregorian']:
+                self.ds_data['time'] = self.ds_data.convert_calendar("gregorian", dim="time", align_on="year" if calendar=="360_day" else None)
         if drop_leap_days:
             self.ds_data = self.ds_data.sel(
                 time=~(

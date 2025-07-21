@@ -7,6 +7,11 @@ paths_file="../../paths_so4.json"
 # model="CNRM-ALADIN63_MPI-M-MPI-ESM-LR_r1i1p1"
 
 model="MOHC-HadREM3-GA7-05_CNRM-CERFACS-CNRM-CM5_r1i1p1"
+# model="MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
+# model="MOHC-HadREM3-GA7-05_MPI-M-MPI-ESM-LR_r1i1p1"
+# model="MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
+# model="MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
+
 wind_multiple_heights="False"
 scenario="rcp85"
 
@@ -25,12 +30,6 @@ else
     temp_res_array=("3hr" "3hr" "3hr" "3hr" "3hr" "3hr" "3hr" "day" "day" "day")
     height_ref_array=(2 2 "None" 100 150 10 "None" "None" "None" "None")
 fi
-
-# Only process mrro and clt
-variables=("mrro" "clt")
-variables_ref=("ro" "tcc")
-temp_res_array=("day" "day")
-height_ref_array=("None" "None")
 
 nr_processes=20
 memory_limit="auto"
