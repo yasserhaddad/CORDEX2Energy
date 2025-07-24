@@ -11,8 +11,8 @@ model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_MPI-M-MPI-ESM-LR_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
-scenario="rcp85"
-wind_multiple_heights="True"
+scenario="rcp45"
+wind_multiple_heights="False"  # Set to True if wind100m and wind150m are present
 
 # Define variables and temporal resolutions
 ## Add or remove wind100m and wind150m from variables_3hr if wind_multiple_heights is present
