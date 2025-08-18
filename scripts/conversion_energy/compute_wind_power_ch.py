@@ -6,7 +6,6 @@ from pathlib import Path
 
 import dask
 import numpy as np
-import pandas as pd
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
@@ -23,9 +22,9 @@ from src.conversion_energy.wind import (
     extrapolate_wind_speed,
 )
 from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
-from src.utils.utils_xarray import sel_extent
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
 from src.conversion_energy.aggregate_data import aggregate_data_per_country
+from src.utils.utils_xarray import sel_extent
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")
@@ -52,11 +51,7 @@ if __name__ == "__main__":
     path_energy = path_data_processed / "energy"
 
     output_path = (
-        path_energy
-        / "europe"
-    ) if args.scope == "europe" else (
-        path_energy
-        / "ch"
+        (path_energy / "europe") if args.scope == "europe" else (path_energy / "ch")
     )
     (output_path / "wind_power").mkdir(parents=True, exist_ok=True)
 
@@ -65,67 +60,81 @@ if __name__ == "__main__":
 
     time_start = time.time()
     print("Computing smoothed power curves...")
-    power_curves_smoothed = {
-        turbine: compute_smooth_power_curve(turbine) for turbine in EUROPE_TURBINES
-    } if args.scope == "europe" else {
-        turbine: compute_smooth_power_curve(turbine) for turbine in CH_TURBINES
-    }
+    power_curves_smoothed = (
+        {turbine: compute_smooth_power_curve(turbine) for turbine in EUROPE_TURBINES}
+        if args.scope == "europe"
+        else {turbine: compute_smooth_power_curve(turbine) for turbine in CH_TURBINES}
+    )
 
     print("Loading wind data...")
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30} if args.scope == "europe" else {
-        "lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5
-    }
-    chunks_bc = {
-        "time": 2920,
-        "lat": 128,
-        "lon": 128,
-    }
+    extent = (
+        {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
+        if args.scope == "europe"
+        else {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
+    )
 
-    ds_wind_100m = ClimateModelData(
+    path_wind_100m = (
         path_data_processed
         / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "bias_corrected"
         / "3hr"
-        / "wind100m.zarr",
-        extent=extent,
-        chunks=chunks_bc,
+        / "wind100m.zarr"
     )
+    if path_wind_100m.exists():
+        heights = [100, 150]
+        ds_wind = ClimateModelData(
+            path_wind_100m,
+            extent=extent,
+            chunks=BC_SUBDAILY_CHUNKS,
+        )
 
-    ds_wind_150m = ClimateModelData(
-        path_data_processed
-        / "cordex_processed"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-        / "bias_corrected"
-        / "3hr"
-        / "wind150m.zarr",
-        extent=extent,
-        chunks=chunks_bc,
-    )
+        ds_wind_150m = ClimateModelData(
+            path_wind_100m.parent / "wind150m.zarr",
+            extent=extent,
+            chunks=BC_SUBDAILY_CHUNKS,
+        )
 
-    print("Computing wind speed exponent...")
-    da_alpha = compute_power_law_exponent(
-        ds_wind_100m.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
-    )
-    with ProgressBar(dt=60):
-        da_alpha = da_alpha.compute() if args.scope == "ch" else da_alpha.persist()
+        print("Computing wind speed exponent...")
+        da_alpha = compute_power_law_exponent(
+            ds_wind.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
+        )
+        with ProgressBar(dt=60):
+            da_alpha = da_alpha.compute() if args.scope == "ch" else da_alpha.persist()
+
+    else:
+        heights = [10, 100]
+        da_alpha = sel_extent(xr.open_dataset(
+            path_data_processed
+            / "cerra_processed"
+            / "alpha"
+            / f"da_alpha_temp_smoothed_cerra_heights_{heights[0]}_{heights[1]}.nc"
+        ).alpha, extent=extent)
+        ds_wind = ClimateModelData(
+            path_wind_100m.parent / "sfcWind.zarr",
+            extent=extent,
+            chunks=BC_SUBDAILY_CHUNKS,
+        )
+
+        da_alpha = da_alpha.isel(
+            time=(np.arange(len(ds_wind.ds_data.time)) % len(da_alpha.time))
+        ).assign_coords(time=ds_wind.ds_data.time).chunk(BC_SUBDAILY_CHUNKS)
+
+    wind_var = list(ds_wind.ds_data.data_vars.keys())[0]
 
     ds_wind_power = []
-
     turbines = EUROPE_TURBINES if args.scope == "europe" else CH_TURBINES
     hub_heights = EUROPE_HUB_HEIGHTS if args.scope == "europe" else CH_HUB_HEIGHTS
 
     for turbine_type in turbines:
         print(f"Computing wind power for {turbine_type}")
         da_wind_hub_height = extrapolate_wind_speed(
-            ds_wind_100m.ds_data.wind100m, 100, hub_heights[turbine_type], da_alpha
+            ds_wind.ds_data[wind_var], heights[0], hub_heights[turbine_type], da_alpha
         )
         ds_wind_power.append(
             compute_wind_power(
                 da_wind_hub_height,
-                power_curves_smoothed[turbine_type][
-                    turbine_type.replace("/", "_")
-                ],
+                power_curves_smoothed[turbine_type][turbine_type.replace("/", "_")],
                 turbine_type.replace("/", "_"),
                 step=0.01,
                 parallelized=True,
@@ -140,7 +149,6 @@ if __name__ == "__main__":
         else:
             ds_wind_power = xr.merge(ds_wind_power).persist()
 
-
     if args.scope == "europe":
         with ProgressBar(dt=60):
             ds_wind_power_agg = aggregate_data_per_country(
@@ -152,9 +160,8 @@ if __name__ == "__main__":
                 ds_wind_power,
                 method="median_and_better",
                 offshore=True,
-                path_eez_file=path_data_processed / "maps" / "eez_v12" / "eez_v12.shp"
+                path_eez_file=path_data_processed / "maps" / "eez_v12" / "eez_v12.shp",
             ).compute()
-
 
     if args.scope == "europe":
         output_path = (
@@ -174,7 +181,7 @@ if __name__ == "__main__":
     zarr_encoding = {
         var: {
             "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-            "chunks": tuple(chunks_bc.values()),
+            "chunks": tuple(BC_SUBDAILY_CHUNKS.values()),
         }
         for var in ds_wind_power.data_vars
     }
@@ -185,5 +192,8 @@ if __name__ == "__main__":
     )
     ds_wind_power.to_zarr(output_path, mode="w", encoding=zarr_encoding)
 
-
-    print("Time to compute wind power for all turbines: ", (time.time() - time_start) / 60, " minutes.")
+    print(
+        "Time to compute wind power for all turbines: ",
+        (time.time() - time_start) / 60,
+        " minutes.",
+    )

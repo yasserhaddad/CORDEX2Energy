@@ -9,8 +9,8 @@ sys.path.append("../..")
 from src.data_processing.load_data import ClimateModelData
 from src.conversion_energy.aggregate_data import aggregate_data_per_country
 from dask.diagnostics import ProgressBar
+from src.utils.constants import EXTENT_CH, BC_SUBDAILY_CHUNKS
 
-extent = {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
 vars = ["tas", "rsds", "sfcWind", "huss"]
 
 dask.config.set(num_workers=15, scheduler="processes")
@@ -29,11 +29,7 @@ if __name__ == "__main__":
 
     path_data_processed = Path(paths["path_data_processed"])
     path_data_temporary = Path(paths["path_data_temporary"])
-    chunks_bc = {
-        "time": 2920,
-        "lat": 128,
-        "lon": 128,
-    }
+
     output_path = (
         path_data_temporary
         / "cordex_processed"
@@ -53,8 +49,8 @@ if __name__ == "__main__":
                 / "bias_corrected"
                 / "3hr"
                 / f"{var}.zarr",
-                extent=extent,
-                chunks=chunks_bc,
+                extent=EXTENT_CH,
+                chunks=BC_SUBDAILY_CHUNKS,
             )
 
             ds.ds_data = ds.ds_data.sel(

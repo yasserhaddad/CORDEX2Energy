@@ -15,7 +15,7 @@ from src.conversion_energy.pv import (
     compute_pv_for_grid,
 )
 from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_CH
 from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
 
 if __name__ == "__main__":
@@ -43,8 +43,6 @@ if __name__ == "__main__":
     time_start = time.time()
 
     print("Loading data")
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-    extent_ch = {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
     chunks_bc = {
         "time": 2920,
         "lat": 128,
@@ -58,7 +56,7 @@ if __name__ == "__main__":
         / "bias_corrected"
         / "3hr"
         / "rsds.zarr",
-        extent=extent_ch,
+        extent=EXTENT_CH,
     )
 
     ds_tas_bc = ClimateModelData(
@@ -68,7 +66,7 @@ if __name__ == "__main__":
         / "bias_corrected"
         / "3hr"
         / "tas.zarr",
-        extent=extent_ch,
+        extent=EXTENT_CH,
     )
 
     ds_sfcWind_bc = ClimateModelData(
@@ -78,7 +76,7 @@ if __name__ == "__main__":
         / "bias_corrected"
         / "3hr"
         / "sfcWind.zarr",
-        extent=extent_ch,
+        extent=EXTENT_CH,
     )
 
     ds_orog = sel_extent(
@@ -93,7 +91,7 @@ if __name__ == "__main__":
                 ).glob("*.nc")
             )[0]
         ),
-        extent_ch,
+        extent=EXTENT_CH,
     )
 
     print("Matching instantaneous to mean values")

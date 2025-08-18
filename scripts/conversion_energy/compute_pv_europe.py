@@ -18,7 +18,7 @@ from src.conversion_energy.pv import (
     PVOutput,
 )
 from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
 from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
 from src.conversion_energy.aggregate_data import aggregate_data_per_country
 
@@ -64,15 +64,9 @@ if __name__ == "__main__":
     time_start = time.time()
 
     print("Loading data")
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-    chunks_bc = {
-        "time": 2920,
-        "lat": 128,
-        "lon": 128,
-    }
-
+    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 34}
     step = 15
-    time_slices = [(start, min(start + step - 1, 2099)) for start in range(1991, 2100, step)]
+    time_slices = [(start, min(start + step - 1, 2100)) for start in range(1991, 2101, step)]
     for start_year, end_year in time_slices:
         print(f"Processing data for {start_year}-{end_year}")
         time_slice = slice(str(start_year), str(end_year))
@@ -99,7 +93,7 @@ if __name__ == "__main__":
             / "3hr"
             / "rsds.zarr",
             extent=extent,
-            chunks=chunks_bc,
+            chunks=BC_SUBDAILY_CHUNKS,
         )
 
         ds_tas_bc = ClimateModelData(
@@ -110,7 +104,7 @@ if __name__ == "__main__":
             / "3hr"
             / "tas.zarr",
             extent=extent,
-            chunks=chunks_bc,
+            chunks=BC_SUBDAILY_CHUNKS,
         )
 
         ds_sfcWind_bc = ClimateModelData(
@@ -121,7 +115,7 @@ if __name__ == "__main__":
             / "3hr"
             / "sfcWind.zarr",
             extent=extent,
-            chunks=chunks_bc,
+            chunks=BC_SUBDAILY_CHUNKS,
         )
 
         ds_orog = sel_extent(
@@ -209,7 +203,7 @@ if __name__ == "__main__":
         zarr_encoding = {
             var: {
                 "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-                "chunks": tuple(chunks_bc.values()),
+                "chunks": tuple(BC_SUBDAILY_CHUNKS.values()),
             }
             for var in ds_pv.data_vars
         }
@@ -240,7 +234,7 @@ if __name__ == "__main__":
             encoding={
                 var: {
                     "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-                    "chunks": tuple(chunks_bc.values()),
+                    "chunks": tuple(BC_SUBDAILY_CHUNKS.values()),
                 }
                 for var in ds_pv.data_vars
             },

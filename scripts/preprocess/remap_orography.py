@@ -40,9 +40,13 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     climate_grid_file = "grid_EUR11_lonlat_griddes.txt"
 
+    (output_dir / orog_path.name).unlink(missing_ok=True)
     cdo_remap(
         str(orog_path),
         str(output_dir / orog_path.name),
         "conservative",
         path_data_processed / "climate_grids" / climate_grid_file,
+        path_data_processed / "climate_grids" / "grid_cnrm_453x453.txt"
+        if "CNRM-ALADIN63" in args.climate_model_chain
+        else None
     )

@@ -1,24 +1,27 @@
+import os
 import sys
 
 sys.path.append("../..")
 
+import argparse
 import ast
 import json
 import shutil
-import argparse
-import pandas as pd
 from pathlib import Path
 from time import time
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO
+
+import dask
+import pandas as pd
 from src.data_processing.load_data import ClimateModelData
-from src.utils.cdo_commands import cdo_remap
-from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
-from src.utils.utils_load_data import get_raw_cordex_data_paths
 from src.data_processing.test_climate_data import (
     has_duplicate_coords,
     has_identical_random_timesteps,
     is_time_sorted,
 )
+from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
+from src.utils.cdo_commands import cdo_remap
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO
+from src.utils.utils_load_data import get_raw_cordex_data_paths
 
 
 def extract_year(path_cordex: Path) -> int:
@@ -51,6 +54,16 @@ if __name__ == "__main__":
     parser.add_argument("temp_res", type=str, help="Temporal resolution.")
 
     args = parser.parse_args()
+
+    os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+    os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
+
+    dask.config.set({"logging.distributed": "error"})
+    dask.config.set(num_workers=16, scheduler="processes")
+    dask.config.set({"array.chunk-size": "400MiB"})
+
     paths = json.load(open(args.paths_file))
 
     path_data_processed = Path(paths["path_data_processed"])
@@ -146,6 +159,7 @@ if __name__ == "__main__":
         load=False,
     )
 
+    print("\tChecking time coordinates and duplicates...")
     if not is_time_sorted(climate_data.ds_data):
         print("Time coordinate is not sorted. Sorting now...")
         climate_data.ds_data = climate_data.ds_data.sortby("time")
@@ -157,6 +171,7 @@ if __name__ == "__main__":
     if has_identical_random_timesteps(climate_data.ds_data):
         print("Dataset contains identical random timesteps.")
 
+    print("\tSaving processed dataset...")
     output_path = (
         path_data_processed
         / "cordex_processed"

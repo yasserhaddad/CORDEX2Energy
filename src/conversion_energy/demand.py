@@ -114,7 +114,7 @@ def compute_cdd_hdd_xr(
             )
         )
 
-    ds_metric_weighted = xr.merge(list_ds).compute()
+    ds_metric_weighted = xr.merge(list_ds)
     ds_metric_weighted.attrs["units"] = "degree days"
     ds_metric_weighted.attrs["long_name"] = "Degree days"
     ds_metric_weighted.attrs["description"] = (

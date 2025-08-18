@@ -24,7 +24,10 @@ class ClimateModelData:
         drop_leap_days: bool = True,
         load: bool = False,
     ):
-        if path_climate_data.name.endswith(".zarr"):
+        if isinstance(path_climate_data, list):
+            engine = "zarr" if path_climate_data[0].name.endswith(".zarr") else "netcdf"
+            self.ds_data = xr.open_mfdataset(path_climate_data, chunks=chunks, combine_attrs="override", engine=engine).sortby("time")
+        elif path_climate_data.name.endswith(".zarr"):
             self.ds_data = xr.open_zarr(path_climate_data, chunks=chunks)
         elif path_climate_data.is_dir():
             self.ds_data = xr.open_mfdataset(

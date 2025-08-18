@@ -22,6 +22,7 @@ from ..utils.utils_xarray import (
     match_time_steps
 )
 from ..utils.metrics import compute_trend_statsmodel
+from ..utils.constants import BC_DAILY_CHUNKS, BC_SUBDAILY_CHUNKS
 
 sns.set_style("whitegrid", {"grid.color": ".93"})
 

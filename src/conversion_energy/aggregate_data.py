@@ -104,6 +104,12 @@ def match_point_to_unique_polygon(
 
     return point_to_polygon_map
 
+def create_regions_mask(gdf_regions: gpd.GeoDataFrame, names: str, da: xr.DataArray) -> xr.DataArray:
+    regions = regionmask.from_geopandas(gdf_regions, names=names)
+    regions_mask = regions.mask(da)
+
+    return regions, regions_mask
+
 
 def create_geodataframe_climate_grid(ds_climate_data: xr.Dataset) -> gpd.GeoDataFrame:
     # Create a list of points from the lat/lon grid
@@ -126,7 +132,7 @@ def create_geodataframe_climate_grid(ds_climate_data: xr.Dataset) -> gpd.GeoData
 def create_country_mask(ds: xr.Dataset) -> xr.DataArray:
     # Create a mask for the countries
     countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_10
-    mask_countries = countries.mask(ds)
+    mask_countries = countries.mask(ds, flag="names")
     mask_countries.name = "country"
     mask_countries.attrs["long_name"] = "Country"
     countries = countries.to_dataframe()
@@ -150,7 +156,7 @@ def create_country_offshore_mask(ds: xr.Dataset, path_eez_file: Path) -> xr.Data
         names=gdf_eez["TERRITORY1"],
         outlines=gdf_eez.geometry.values,
     )
-    mask_countries = eez_regions.mask(ds, wrap_lon=True)
+    mask_countries = eez_regions.mask(ds)
     mask_countries.name = "country"
     mask_countries.attrs["long_name"] = "Country"
     return mask_countries, eez_regions.to_dataframe()

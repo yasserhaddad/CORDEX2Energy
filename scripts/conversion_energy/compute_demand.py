@@ -20,14 +20,20 @@ from src.conversion_energy.demand import (
     compute_cdd_hdd_xr,
 )
 from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS, EXTENT_BC
 from src.utils.utils_xarray import sel_extent
 
-dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
-dask.config.set({"distributed.worker.use-file-locking": "False"})
+import os
+os.environ["OMP_NUM_THREADS"] = "1"       # OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"       # MKL
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+os.environ["NUMEXPR_NUM_THREADS"] = "1"   # numexpr
+
 dask.config.set({"logging.distributed": "error"})
-dask.config.set(num_workers=15, scheduler="processes")
-dask.config.set({"array.chunk-size": "500MiB"})
+# dask.config.set(num_workers=15, scheduler="processes")
+# dask.config.set(num_workers=15, threads_per_worker=1, scheduler="processes")
+dask.config.set(num_workers=15, threads_per_worker=16)
+dask.config.set({"array.chunk-size": "400MiB"})
 
 
 def parse_arguments():
@@ -54,8 +60,12 @@ def setup_tmp_directories(paths, climate_model_chain, climate_scenario):
 
 
 def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_bc):
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-    extent_pop = {"lat_min": 29, "lat_max": 76, "lon_min": -11, "lon_max": 31}
+    extent_pop = {
+        "lat_min": EXTENT_BC["lat_min"] - 1,
+        "lat_max": EXTENT_BC["lat_max"] + 1,
+        "lon_min": EXTENT_BC["lon_min"] - 1,
+        "lon_max": EXTENT_BC["lon_max"] + 1,
+    }
 
     ds_tas_bc = ClimateModelData(
         Path(paths["path_data_processed"])
@@ -64,7 +74,7 @@ def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_b
         / "bias_corrected"
         / "3hr"
         / "tas.zarr",
-        extent=extent,
+        extent=EXTENT_BC,
         chunks=chunks_bc,
     )
 
@@ -82,10 +92,15 @@ def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_b
     )
 
     countries = regionmask.defined_regions.natural_earth_v5_0_0.countries_10
-    mask_countries_worldpop = countries.mask(da_worldpop_coarse)
+    mask_countries_worldpop = countries.mask(da_worldpop_coarse, flag="names")
     da_worldpop_coarse = normalize_population_data(
         da_worldpop_coarse, mask_countries_worldpop
     ).where(da_worldpop_coarse > 0, np.nan)
+
+    da_worldpop_coarse = da_worldpop_coarse.chunk({
+        "lat": ds_tas_bc.ds_data.chunksizes["lat"][0],
+        "lon": ds_tas_bc.ds_data.chunksizes["lon"][0]
+    })
 
     return ds_tas_bc, da_worldpop_coarse
 
@@ -106,14 +121,16 @@ def split_time_range(ds_tas_bc, nb_splits=3):
 
     time_ranges = [
         time_range[
-            (time_range >= split_points[i]) & (time_range <= split_points[i + 1])
+            (time_range >= split_points[i]) & (time_range < split_points[i + 1])
         ]
         for i in range(len(split_points) - 1)
     ]
     return time_ranges
 
 
-def process_splits(ds_tas_bc, da_worldpop_coarse, time_ranges, tmp_energy_data_dir, chunks_bc):
+def process_splits(
+    ds_tas_bc, da_worldpop_coarse, time_ranges, tmp_energy_data_dir, chunks_bc
+):
     for i, time_range_split in enumerate(time_ranges):
         print(f"Processing split {time_range_split[0]} to {time_range_split[-1]}")
         ds_split = ds_tas_bc.ds_data.sel(
@@ -141,10 +158,9 @@ def process_splits(ds_tas_bc, da_worldpop_coarse, time_ranges, tmp_energy_data_d
                 for var in ds_demand_split.data_vars
             }
             ds_demand_split.to_zarr(
-                tmp_energy_data_dir
-                / f"tmp_{i+1}.zarr",
+                tmp_energy_data_dir / f"tmp_{i+1}.zarr",
                 mode="w",
-                encoding=zarr_encoding
+                encoding=zarr_encoding,
             )
 
         del ds_split, ds_demand_split
@@ -195,13 +211,18 @@ def main():
     time_start_script = time.time()
 
     print("Loading and processing data")
-    chunks_bc = {"time": 2920, "lat": 128, "lon": 128}
     ds_tas_bc, da_worldpop_coarse = load_and_process_data(
-        paths, args.climate_model_chain, args.climate_scenario, chunks_bc
+        paths, args.climate_model_chain, args.climate_scenario, BC_SUBDAILY_CHUNKS
     )
 
-    time_ranges = split_time_range(ds_tas_bc, nb_splits=4)
-    process_splits(ds_tas_bc, da_worldpop_coarse, time_ranges, tmp_energy_data_dir, chunks_bc)
+    time_ranges = split_time_range(ds_tas_bc, nb_splits=5)
+    process_splits(
+        ds_tas_bc,
+        da_worldpop_coarse,
+        time_ranges,
+        tmp_energy_data_dir,
+        BC_SUBDAILY_CHUNKS,
+    )
 
     path_energy = Path(paths["path_data_processed"]) / "energy"
     concatenate_and_save_datasets(
@@ -209,7 +230,7 @@ def main():
         path_energy,
         args.climate_model_chain,
         args.climate_scenario,
-        chunks_bc,
+        BC_SUBDAILY_CHUNKS,
     )
 
     print("Done.")

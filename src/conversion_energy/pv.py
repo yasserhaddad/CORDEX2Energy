@@ -1,4 +1,5 @@
 import json
+from tqdm import tqdm
 import multiprocessing
 from typing import Union
 import numpy as np
@@ -346,121 +347,44 @@ def compute_pv_for_grid(
     """
     lats = da_radiation.lat.values
     lons = da_radiation.lon.values
-
-    ctx = multiprocessing.get_context("spawn")
-    with ctx.Pool(num_workers) as pool:
-        results = pool.starmap(
-            compute_pv_for_grid_worker,
-            [
-                (
-                    lat_lon,
-                    da_radiation,
-                    da_temperature,
-                    da_wind_speed,
-                    tilt,
-                    azimuth,
-                    pv_configuration,
-                    system_loss,
-                    da_altitude
-                )
-                for lat_lon in [(lat, lon) for lat in lats for lon in lons]
-            ],
-        )
-
-    da_pv = xr.combine_by_coords(results)
-
-    return da_pv
-
-
-class PVOutput:
-    def __init__(self, pv_configuration: dict = DEFAULT_PV_CONFIGURATION, system_loss: float = 0.14):
-        self.pv_configuration = pv_configuration
-        self.system_loss = 0.14
-
-    def compute_pv_np(
-        self,
-        rsds: np.ndarray,
-        temp: np.ndarray,
-        wind: np.ndarray,
-        time: np.ndarray,
-        lat: float,
-        lon: float,
-        tilt: float,
-        azimuth: float,
-        altitude: float,
-    ) -> np.ndarray:
-        """
-        Compute PV output for one pixel using NumPy arrays.
-        """
-        time_index = pd.to_datetime(time)
-
-        location = Location(lat, lon, altitude=altitude)
-        system = PVSystem(
-            module_parameters=self.pv_configuration["module_parameters"],
-            inverter_parameters=self.pv_configuration["inverter_parameters"],
-            racking_model=self.pv_configuration["racking_model"],
-            temperature_model_parameters=self.pv_configuration["temperature_model_parameters"],
-            surface_tilt=tilt,
-            surface_azimuth=azimuth,
-        )
-        mc = ModelChain(system, location, aoi_model="martin_ruiz")
-
-        solar_position = location.get_solarposition(time_index)
-        dni_dhi = erbs(rsds, solar_position["zenith"], time_index)
-        poa_irrad = pvlib.irradiance.get_total_irradiance(
-            tilt,
-            azimuth,
-            dni=dni_dhi["dni"],
-            ghi=rsds,
-            dhi=dni_dhi["dhi"],
-            solar_zenith=solar_position["zenith"],
-            solar_azimuth=solar_position["azimuth"],
-        )
-        module_temp = pvlib.temperature.sapm_cell(
-            poa_irrad["poa_global"],
-            temp,
-            wind,
-            **self.pv_configuration["temperature_model_parameters"],
-        )
-
-        weather = pd.DataFrame({
-            "ghi": rsds,
-            "dni": dni_dhi["dni"],
-            "dhi": dni_dhi["dhi"],
-            "temp_air": temp,
-            "wind_speed": wind,
-            "temp_module": module_temp,
-        })
-
-        mc.run_model(weather)
-        return mc.results.ac.values * (1 - self.system_loss)
-
-    def compute_pv_xarray(
-        self,
-        da_radiation: xr.DataArray,
-        da_temperature: xr.DataArray,
-        da_wind: xr.DataArray,
-        da_altitude: xr.DataArray,
-        tilt: float,
-        azimuth: float,
-    ) -> xr.DataArray:
-
-        time = da_radiation["time"]
-        lat = da_radiation.lat
-        lon = da_radiation.lon
-
-        return xr.apply_ufunc(
-            self.compute_pv_np,
+    latlon_list = [(lat, lon) for lat in lats for lon in lons]
+    args = [
+        (
+            lat_lon,
             da_radiation,
             da_temperature,
-            da_wind,
-            time,
-            lat,
-            lon,
+            da_wind_speed,
             tilt,
             azimuth,
-            da_altitude,
-            vectorize=True,
-            dask="parallelized",
-            output_dtypes=[float],
-        ).rename("ac_power")
+            pv_configuration,
+            system_loss,
+            da_altitude
+        )
+        for lat_lon in latlon_list
+    ]
+
+    ctx = multiprocessing.get_context("spawn")
+    # with ctx.Pool(num_workers) as pool:
+    #     results = pool.starmap(
+    #         compute_pv_for_grid_worker,
+    #         [
+    #             (
+    #                 lat_lon,
+    #                 da_radiation,
+    #                 da_temperature,
+    #                 da_wind_speed,
+    #                 tilt,
+    #                 azimuth,
+    #                 pv_configuration,
+    #                 system_loss,
+    #                 da_altitude
+    #             )
+    #             for lat_lon in [(lat, lon) for lat in lats for lon in lons]
+    #         ],
+    #     )
+    with ctx.Pool(num_workers) as pool:
+        results = []
+        for result in tqdm(pool.imap(compute_pv_for_grid_worker, args), total=len(args)):
+            results.append(result)
+
+    return xr.combine_by_coords(results)
