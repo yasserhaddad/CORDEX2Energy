@@ -17,10 +17,10 @@ from .analysis import (
 
 sns.set_style("whitegrid", {"grid.color": ".93"})
 
-FONTSIZE_LEGEND = 10
-FONTSIZE_TICKS = 10
-FONTSIZE_LABELS = 12
-FONTSIZE_TITLE = 14
+FONTSIZE_LEGEND = 18
+FONTSIZE_TICKS = 16
+FONTSIZE_LABELS = 19
+FONTSIZE_TITLE = 22
 
 COLORBLIND_PALETTE = sns.color_palette("colorblind")
 BLUE = COLORBLIND_PALETTE[0]
@@ -343,6 +343,7 @@ def create_shared_colorbar(
     cbar.set_label(label, fontsize=FONTSIZE_LABELS)
     cbar.ax.tick_params(labelsize=FONTSIZE_TICKS)
 
+
 def compute_vmin_vmax(
     ds: xr.Dataset,
     var_names: list[str],
@@ -387,7 +388,7 @@ def compute_vmin_vmax(
     return vmin, vmax
 
 
-def plot_ensemble_mean(ds: xr.Dataset, figsize=(18, 5), path_savefig: Path = None):
+def plot_ensemble_mean(ds: xr.Dataset, figsize=(18, 5), country_border_width: float = 1.0, title: str = "Ensemble mean", path_savefig: Path = None):
     """
     Plot ensemble mean for each variable in the dataset.
 
@@ -408,12 +409,14 @@ def plot_ensemble_mean(ds: xr.Dataset, figsize=(18, 5), path_savefig: Path = Non
     var_titles = {
         "pv": "Solar Power",
         "wind": "Wind Power",
+        "hydropower": "Hydropower",
         "HDD": "Heating Degree Days",
         "CDD": "Cooling Degree Days",
     }
     var_clabel = {
         "pv": "Capacity Factor (-)",
         "wind": "Capacity Factor (-)",
+        "hydropower": "Capacity Factor (-)",
         "HDD": "Degree-Days",
         "CDD": "Degree-Days",
     }
@@ -441,26 +444,26 @@ def plot_ensemble_mean(ds: xr.Dataset, figsize=(18, 5), path_savefig: Path = Non
             cmap=CMAPS.get(var, "viridis"),
             transform=ccrs.PlateCarree(),
             add_colorbar=True,
-            vmax=ens_mean[var].quantile(0.99) if var in ["HDD", "CDD"] else None,
+            vmax=ens_mean[var].quantile(0.99) if var in ["HDD", "CDD", "hydropower"] else None,
             cbar_kwargs={
-                "label": var_clabel.get(var, ""),
+                # "label": var_clabel.get(var, ""),
                 "shrink": 0.7,
                 "aspect": 20,
                 "pad": 0.03,
                 "orientation": "horizontal",
             },
         )
+        cbar = im.colorbar
+        cbar.set_label(var_clabel.get(var, ""), fontsize=FONTSIZE_LABELS-1)
+        cbar.ax.tick_params(labelsize=FONTSIZE_TICKS)
         ax.coastlines()
-        ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=0.5)
+        ax.add_feature(cfeature.BORDERS, edgecolor="black", linewidth=country_border_width)
         ax.set_title(var_titles.get(var, var), fontsize=FONTSIZE_LABELS)
         ax.set_xlabel("")
         ax.set_ylabel("")
-        # create_shared_colorbar(
-        #     fig, axes, [i], im, var_clabel.get(var, ""), orientation="horizontal",
-        #     shrink=0.6, aspect=50, width_ratio=0.8
-        # )
 
-    plt.suptitle("Ensemble mean", fontsize=FONTSIZE_TITLE, y=0.9)
+    if title is not None:
+        plt.suptitle(title, fontsize=FONTSIZE_TITLE, y=0.9)
     plt.tight_layout()
     if path_savefig is not None:
         path_savefig.parent.mkdir(parents=True, exist_ok=True)
@@ -473,6 +476,7 @@ def plot_ensemble_mean_percentage_change(
     target_dataset: xr.Dataset,
     figsize=(18, 5),
     path_savefig: Path = None,
+    title: str = "Ensemble mean percentage change",
     cmap="RdBu_r",
 ):
     """
@@ -499,6 +503,7 @@ def plot_ensemble_mean_percentage_change(
     var_titles = {
         "pv": "Solar Power",
         "wind": "Wind Power",
+        "hydropower": "Hydropower",
         "HDD": "Heating Degree Days",
         "CDD": "Cooling Degree Days",
     }
@@ -535,11 +540,14 @@ def plot_ensemble_mean_percentage_change(
     pv_wind_vmin, pv_wind_vmax = compute_vmin_vmax(
         ens_mean, ["pv", "wind"], quantiles=None, center_zero=True
     )
+    hydropower_vmin, hydropower_vmax = compute_vmin_vmax(
+        ens_mean, ["hydropower"], quantiles=(0.05, 0.95), center_zero=True
+    )
     hdd_vmin, hdd_vmax = compute_vmin_vmax(
-        ens_mean, ["HDD"], quantiles=(0.025, 0.975), center_zero=True
+        ens_mean, ["HDD"], quantiles=(0.05, 0.95), center_zero=True
     )
     cdd_vmin, cdd_vmax = compute_vmin_vmax(
-        ens_mean, ["CDD"], quantiles=(0.025, 0.975), center_zero=True
+        ens_mean, ["CDD"], quantiles=(0.05, 0.95), center_zero=True
     )
 
     for i, var in enumerate(var_names):
@@ -547,20 +555,33 @@ def plot_ensemble_mean_percentage_change(
         im = ens_mean[var].plot(
             ax=ax,
             cmap=cmap,
-            vmin=pv_wind_vmin if var in ["pv", "wind"] else (hdd_vmin if var == "HDD" else cdd_vmin),
-            vmax=pv_wind_vmax if var in ["pv", "wind"] else (hdd_vmax if var == "HDD" else cdd_vmax),
+            vmin=pv_wind_vmin
+            if var in ["pv", "wind"]
+            else (
+                hydropower_vmin
+                if var == "hydropower"
+                else (hdd_vmin if var == "HDD" else cdd_vmin)
+            ),
+            vmax=pv_wind_vmax
+            if var in ["pv", "wind"]
+            else (
+                hydropower_vmax
+                if var == "hydropower"
+                else (hdd_vmax if var == "HDD" else cdd_vmax)
+            ),
             transform=ccrs.PlateCarree(),
             add_colorbar=True,
             cbar_kwargs={
-                "label": "%",
+                # "label": "%",
                 "shrink": 0.7,
                 "aspect": 20,
                 "pad": 0.03,
                 "orientation": "horizontal",
             },
-            # add_colorbar=(var in ["pv", "wind"]) or (i == n_vars - 1),
-            # cbar_ax=None if i < n_vars - 1 else fig.add_axes([0.92, 0.25, 0.015, 0.5]),
         )
+        cbar = im.colorbar
+        cbar.set_label("% relative to reference", fontsize=FONTSIZE_LABELS-2)
+        cbar.ax.tick_params(labelsize=FONTSIZE_TICKS)
         # Add hatching where less than 2/3 agree using contourf
         hatch_overlay = ax.contourf(
             agree_mask[var]["lon"],
@@ -581,20 +602,9 @@ def plot_ensemble_mean_percentage_change(
         ax.set_title(var_titles[var], fontsize=FONTSIZE_LABELS)
         ax.set_xlabel("")
         ax.set_ylabel("")
-        # # Add shared colorbars for specific variable groups
-        # if var == "pv":
-        #     idxs = [var_names.index(v) for v in ["pv", "wind"] if v in var_names]
-        #     create_shared_colorbar(
-        #         fig, axes, idxs, im, "PV/Wind % change", orientation="horizontal"
-        #     )
 
-        # if var == "HDD":
-        #     idxs = [var_names.index(v) for v in ["HDD", "CDD"] if v in var_names]
-        #     create_shared_colorbar(
-        #         fig, axes, idxs, im, "HDD/CDD % change", orientation="horizontal"
-        #     )
-
-    plt.suptitle("Ensemble mean percentage change", fontsize=FONTSIZE_TITLE, y=0.9)
+    if title is not None:
+        plt.suptitle(title, fontsize=FONTSIZE_TITLE, y=0.9)
     plt.tight_layout()
     if path_savefig is not None:
         path_savefig.parent.mkdir(parents=True, exist_ok=True)
@@ -602,18 +612,14 @@ def plot_ensemble_mean_percentage_change(
     plt.show()
 
 
-def plot_regional_timeseries_ensemble(
+def plot_yearly_timeseries_ensemble(
     ds: xr.Dataset,
-    data_var: str,
-    regions_mask: xr.DataArray,
-    all_regions: list[str],
     selected_regions: list[str],
     time_dim: str = "time",
     model_dim: str = "model",
     region_dim: str = "mask",
     rolling: int = 5,
     figsize=(10, 5),
-    ylabel: str = "Mean value",
     title: str = "Regional mean (rolling) timeseries",
     path_savefig: Path = None,
 ):
@@ -624,9 +630,7 @@ def plot_regional_timeseries_ensemble(
     ----------
     ds : xr.Dataset
         Dataset containing the data variable and region mask.
-    data_var : str
-        Name of the data variable to plot.
-    regions : list of str
+    selected_regions : list of str
         List of region names to plot (must match region_dim values).
     time_dim : str, optional
         Name of the time dimension.
@@ -634,8 +638,6 @@ def plot_regional_timeseries_ensemble(
         Name of the model dimension.
     region_dim : str, optional
         Name of the region mask dimension.
-    time_slice : slice, optional
-        Time slice to select (e.g., slice("1980", "2050")).
     rolling : int, optional
         Window size for rolling mean.
     figsize : tuple, optional
@@ -651,38 +653,86 @@ def plot_regional_timeseries_ensemble(
     -------
     None
     """
-    plt.figure(figsize=figsize)
-    # Resample to yearly if time is not already yearly
-    if not np.issubdtype(ds[time_dim].dtype, np.datetime64):
-        ds = ds
-    else:
-        ds = ds.resample({time_dim: "YE"}).mean(dim=time_dim)
+    var_names = list(ds.data_vars.keys())
+    var_titles = {
+        "pv": "Solar Power",
+        "wind": "Wind Power",
+        "hydropower": "Hydropower",
+        "HDD": "Heating Degree Days",
+        "CDD": "Cooling Degree Days",
+    }
+    var_ylabel = {
+        "pv": "Mean Capacity Factor (-)",
+        "wind": "Mean Capacity Factor (-)",
+        "hydropower": "Mean Capacity Factor (-)",
+        "HDD": "Total Degree-Days",
+        "CDD": "Total Degree-Days",
+    }
+    n_vars = len(var_names)
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=n_vars,
+        figsize=(4 * n_vars, 6) if not figsize else figsize,
+    )
 
-    ds = ds.groupby(regions_mask).mean(dim=("lat", "lon"))
-    ds["mask"] = all_regions
+    if n_vars == 1:
+        axes = [axes]
 
-    for i, region in enumerate(selected_regions):
-        da = ds.sel({region_dim: region})[data_var]
-        if rolling is not None:
-            # Apply rolling mean if specified
-            da = da.rolling({time_dim: rolling}, center=True).mean()
-        mean_da = da.mean(dim=model_dim)
-        min_da = da.min(dim=model_dim)
-        max_da = da.max(dim=model_dim)
-        color = COLORBLIND_PALETTE[i % len(COLORBLIND_PALETTE)]
-        plt.plot(mean_da[time_dim], mean_da, label=f"{region} (mean)", color=color)
-        plt.fill_between(
-            mean_da[time_dim].values,
-            min_da.values,
-            max_da.values,
-            alpha=0.2,
-            color=color,
-            label=f"{region} (range)",
-        )
-    plt.legend()
-    plt.ylabel(ylabel)
-    plt.xlabel("Year")
-    plt.title(title)
+    ds_region = ds.sel({region_dim: selected_regions})
+    if rolling is not None:
+        # Apply rolling mean if specified
+        ds_region = ds_region.rolling({time_dim: rolling}, center=True).mean()
+    mean_ds_region = ds_region.mean(dim=model_dim)
+    min_ds_region = ds_region.min(dim=model_dim)
+    max_ds_region = ds_region.max(dim=model_dim)
+    wind_solar_vmin, wind_solar_vmax = compute_vmin_vmax(
+        ds_region, ["pv", "wind"], quantiles=None, center_zero=False
+    )
+
+    for i, var in enumerate(var_names):
+        ax = axes[i] if n_vars > 1 else axes
+        for j, region in enumerate(selected_regions):
+            mean_da = mean_ds_region[var].sel({region_dim: region})
+            min_da = min_ds_region[var].sel({region_dim: region})
+            max_da = max_ds_region[var].sel({region_dim: region})
+            color = COLORBLIND_PALETTE[j % len(COLORBLIND_PALETTE)]
+            ax.plot(mean_da[time_dim], mean_da, label=f"{region} (mean)", color=color)
+            ax.fill_between(
+                mean_da[time_dim].values,
+                min_da.values,
+                max_da.values,
+                alpha=0.2,
+                color=color,
+                label=f"{region} (range)",
+            )
+            if var in ["pv", "wind"]:
+                ax.set_ylim(wind_solar_vmin - 0.02, wind_solar_vmax + 0.02)
+            ax.set_ylabel(var_ylabel.get(var, ""), fontsize=FONTSIZE_LABELS)
+            ax.set_title(f"{var_titles.get(var, var)}", fontsize=FONTSIZE_LABELS)
+            ax.tick_params(axis="both", labelsize=FONTSIZE_TICKS)
+            # Show only every other xtick to reduce clutter
+            # Set x-axis limits to match data range to avoid empty space
+            xticklocs = ax.get_xticks()
+            xticklabels = [label.get_text() for label in ax.get_xticklabels()]
+            # Show only every other label
+            new_labels = [label if i % 2 == 0 else "" for i, label in enumerate(xticklabels[:-1])]
+            ax.set_xticks(xticklocs[:-1])
+            ax.set_xticklabels(new_labels)
+
+
+
+    handles, labels = ax.get_legend_handles_labels()
+    fig = ax.get_figure()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=len(selected_regions),
+        bbox_to_anchor=(0.5, -0.35),
+        fontsize=FONTSIZE_LEGEND,
+    )
+    if title is not None:
+        plt.suptitle(title, fontsize=FONTSIZE_TITLE)
     plt.tight_layout()
     if path_savefig is not None:
         path_savefig.parent.mkdir(parents=True, exist_ok=True)

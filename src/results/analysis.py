@@ -31,45 +31,74 @@ def compute_percentage_change(ref: xr.Dataset, target: xr.Dataset, round: int = 
     """
     return (100 * (target - ref) / ref).round(round)
 
-def compute_seasonal_averages(ds: xr.Dataset | xr.DataArray, time_dim: str = "time") -> xr.Dataset | xr.DataArray:
+def compute_seasonal_statistics(ds: xr.Dataset | xr.DataArray, time_dim: str = "time", method: str = "mean") -> xr.Dataset | xr.DataArray:
     """
-    Compute seasonal averages for each year in the dataset.
+    Compute seasonal statistics for each year in the dataset.
 
     Parameters
     ----------
     ds : xr.Dataset
         Input dataset containing the variable of interest.
-    var : str
-        Name of the variable to compute seasonal averages for.
     time_dim : str, optional
         Name of the time dimension, default is "time".
+    method : str, optional
+        Statistical method to use, default is "mean".
 
     Returns
     -------
     xr.DataArray
         Seasonal averages with dimensions ('year', 'season', ...).
     """
-    # Ensure time is a datetime type
+    # # Ensure time is a datetime type
     if not np.issubdtype(ds[time_dim].dtype, np.datetime64):
         ds = ds.copy()
         ds[time_dim] = xr.decode_cf(ds[[time_dim]])[time_dim]
+    if method not in ["mean", "median", "sum"]:
+        raise ValueError(f"Unknown method: {method}")
+    ds = ds.resample({time_dim: 'QS-DEC'})
+    if method == "sum":
+        ds = ds.sum(dim=time_dim)
+    elif method == "median":
+        ds = ds.median(dim=time_dim)
+    else:
+        ds = ds.mean(dim=time_dim)
+    ds = ds.assign_coords(
+        year=(time_dim, ds[time_dim].dt.year.data),
+        season=(time_dim, ds[time_dim].dt.season.data),
+    )
+    return ds
 
-    # For each season, select the timesteps corresponding to the season and take the yearly average
-    season_names = ["DJF", "MAM", "JJA", "SON"]
-    seasonal_yearly_averages = []
+def compute_regional_values(ds: xr.Dataset | xr.DataArray, regions_mask: xr.DataArray, regions_list: list[str], method: str = "mean") -> xr.Dataset | xr.DataArray:
+    """
+    Compute regional averages for the given dataset using the provided regions mask.
 
-    for season in season_names:
-        # Select timesteps for the season
-        da_season = ds.sel(time=ds["time"].dt.season == season)
-        # Group by year and take the mean
-        avg = da_season.groupby("time.year").mean(dim="time")
-        # Add a season coordinate for concatenation
-        avg = avg.expand_dims(season=[season])
-        seasonal_yearly_averages.append(avg)
+    Parameters
+    ----------
+    ds : xr.Dataset | xr.DataArray
+        Input dataset containing the variable of interest.
+    regions_mask : xr.DataArray
+        Boolean mask indicating the regions over which to compute the averages.
+    regions_list : list[str]
+        List of region names corresponding to the regions mask.
+    method : str, optional
+        Aggregation method to use, default is "mean".
 
-    # Concatenate along the new 'season' dimension
-    return xr.concat(seasonal_yearly_averages, dim="season")
-
+    Returns
+    -------
+    xr.Dataset | xr.DataArray
+        Regional averages with dimensions ('region', ...).
+    """
+    if method not in ["mean", "median", "sum"]:
+        raise ValueError(f"Unknown method: {method}")
+    ds_regional = ds.groupby(regions_mask)
+    if method == "median":
+        ds_regional = ds_regional.median(dim=("lat", "lon"))
+    elif method == "sum":
+        ds_regional = ds_regional.sum(dim=("lat", "lon"))
+    else:
+        ds_regional = ds_regional.mean(dim=("lat", "lon"))
+    ds_regional["mask"] = regions_list
+    return ds_regional
 
 def compute_sign_agreement(ds: xr.Dataset | xr.DataArray, model_dim: str = "model") -> xr.Dataset | xr.DataArray:
     """

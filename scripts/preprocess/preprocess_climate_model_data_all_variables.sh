@@ -24,7 +24,7 @@ fi
 
 variables_day=("pr" "mrro" "clt")
 
-variables_3hr=("wind100m" "wind150m")
+variables_3hr=("wind150m")
 variables_day=()
 
 # Create a directory for logs if it doesn't exist

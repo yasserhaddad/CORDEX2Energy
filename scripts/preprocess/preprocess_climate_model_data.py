@@ -11,6 +11,7 @@ from pathlib import Path
 from time import time
 
 import dask
+from dask.diagnostics import ProgressBar
 import pandas as pd
 from src.data_processing.load_data import ClimateModelData
 from src.data_processing.test_climate_data import (
@@ -20,7 +21,7 @@ from src.data_processing.test_climate_data import (
 )
 from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
 from src.utils.cdo_commands import cdo_remap
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO, REGRIDDED_CHUNKS
 from src.utils.utils_load_data import get_raw_cordex_data_paths
 
 
@@ -61,8 +62,13 @@ if __name__ == "__main__":
     os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
 
     dask.config.set({"logging.distributed": "error"})
-    dask.config.set(num_workers=16, scheduler="processes")
+    # dask.config.set(num_workers=16, threads_per_worker=16, scheduler="processes")
+    dask.config.set(num_workers=16, threads_per_worker=16)
     dask.config.set({"array.chunk-size": "400MiB"})
+
+    dask.config.set({'distributed.worker.memory.target': 0.75})  # Spill to disk at 75% usage
+    dask.config.set({'distributed.worker.memory.spill': 0.8})   # Start spilling at 80%
+    dask.config.set({'distributed.worker.memory.pause': 0.9})   # Pause worker at 90%
 
     paths = json.load(open(args.paths_file))
 
@@ -136,23 +142,14 @@ if __name__ == "__main__":
         f"\tRemapping time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."
     )
 
-    # adjusted_timesteps = get_adjusted_timesteps(
-    #     path_data_adjusted_cordex, args.climate_model_chain, args.climate_scenario
-    # )
-
-    # adjusted_timesteps = {
-    #     "original_timesteps": pd.date_range("01-01-1991 00:00", "12-31-2100 00:00", freq="D"),
-    #     "start_year": 1991,
-    # }
-    adjusted_timesteps = None
-
-    chunks = None
+    # chunks = None
+    chunks = {"time": 150}
     extent = EXTENT_BC_MRRO if args.variable == "mrro" else None
 
     climate_data = ClimateModelData(
         temp_output_dir / "future",
         temp_output_dir / "hist",
-        adjusted_timesteps,
+        adjusted_timesteps=None,
         subset_data_vars=[args.variable],
         chunks=chunks,
         extent=extent,
@@ -182,12 +179,10 @@ if __name__ == "__main__":
 
     output_path.mkdir(parents=True, exist_ok=True)
 
-    target_chunks = {"time": -1, "lat": 20, "lon": 20}
-
     zarr_encoding = {
         var: {
             "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-            "chunks": tuple(target_chunks.values()),
+            "chunks": tuple(REGRIDDED_CHUNKS.values()),
         }
         for var in climate_data.ds_data.data_vars
     }
@@ -195,9 +190,10 @@ if __name__ == "__main__":
     if (output_path / f"{args.variable}.zarr").exists():
         shutil.rmtree(output_path / f"{args.variable}.zarr")
 
-    climate_data.ds_data.chunk(target_chunks).to_zarr(
-        output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
-    )
+    with ProgressBar(dt=60):
+        climate_data.ds_data.chunk(REGRIDDED_CHUNKS).to_zarr(
+            output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
+        )
 
     shutil.rmtree(temp_output_dir, ignore_errors=True)
 

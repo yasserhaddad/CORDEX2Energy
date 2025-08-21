@@ -1,31 +1,34 @@
+# import os
+
+# os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+# os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+# os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+# os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
+
 import sys
 
 import pandas as pd
 
 sys.path.append("../..")
 
+import argparse
+import json
+import shutil
+import time
+from pathlib import Path
+
+import dask
+from dask.diagnostics import ProgressBar
+from src.data_processing.bias_correction import BiasCorrection
 from src.data_processing.load_data import ClimateModelData, ClimateReanalysisData
 from src.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     EXTENT_BC,
     EXTENT_BC_MRRO,
-    REFERENCE_PERIOD,
     FUTURE_PERIOD,
+    REFERENCE_PERIOD,
 )
-from src.utils.utils_xarray import get_time_resolution, get_time_offset
-from src.data_processing.bias_correction import BiasCorrection
-
-import dask
-from dask.diagnostics import ProgressBar
-import time
-import json
-import shutil
-import argparse
-from pathlib import Path
-
-dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
-dask.config.set({"distributed.worker.use-file-locking": "False"})
-dask.config.set({"logging.distributed": "error"})
+from src.utils.utils_xarray import get_time_offset, get_time_resolution
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process climate data.")
@@ -79,7 +82,15 @@ if __name__ == "__main__":
 
     if args.nr_processes > 1:
         dask.config.set(num_workers=args.nr_processes, scheduler="processes")
-        dask.config.set({"array.chunk-size": "500MiB"})
+        # dask.config.set(num_workers=args.nr_processes, threads_per_worker=1)
+
+        dask.config.set({
+            "distributed.worker.memory.target": 0.7,  # Spill to disk at 70%
+            "distributed.worker.memory.spill": 0.8,   # Start spilling at 80%
+            "distributed.worker.memory.pause": 0.9,   # Pause worker at 90%
+            "array.chunk-size": "512MiB",
+            "logging.distributed": "error",           # Less verbose logs
+        })
 
     # Define input and output paths
     regridded_cordex_var_path = (
@@ -118,8 +129,8 @@ if __name__ == "__main__":
         drop_leap_days=(args.variable != "rsds"),
     )
 
-    climate_data.ds_data = climate_data.ds_data.chunk(chunks)
-    reanalysis_data.ds_data = reanalysis_data.ds_data.chunk(chunks)
+    climate_data.ds_data = climate_data.ds_data.sel(time=slice(REFERENCE_PERIOD[0], None)).chunk(chunks)
+    reanalysis_data.ds_data = reanalysis_data.ds_data.sel(time=slice(REFERENCE_PERIOD[0], None)).chunk(chunks)
 
     if args.height_ref is not None:
         reanalysis_data.ds_data = reanalysis_data.ds_data.sel(
