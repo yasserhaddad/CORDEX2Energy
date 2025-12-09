@@ -10,6 +10,11 @@ from src.utils.constants import COMPRESSED_ZARR_ENCODING
 from src.data_processing.load_data import ClimateReanalysisData
 from src.utils.cdo_commands import cdo_remap
 import shutil
+import xarray as xr
+from src.data_processing.test_climate_data import has_duplicate_coords, is_time_sorted
+import dask
+from dask.diagnostics import ProgressBar
+import os
 
 
 def get_paths_cerra_data(
@@ -22,6 +27,8 @@ def get_paths_cerra_data(
         cerra_path = path_data_cerra_land / "original" / variable
     elif variable == "q" or variable == "ro":
         cerra_path = path_data_processed / "cerra_processed" / variable
+    elif variable == "msl":
+        cerra_path = path_data_cerra / "processed" / "v1" / "msl" / "day" / "native"
     else:
         cerra_path = path_data_cerra / "original" / variable
     return cerra_path
@@ -47,6 +54,19 @@ if __name__ == "__main__":
     )
     time_start = time()
 
+    os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+    os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
+
+    dask.config.set({"logging.distributed": "error"})
+    dask.config.set(num_workers=16, threads_per_worker=16)
+    dask.config.set({"array.chunk-size": "400MiB"})
+
+    dask.config.set({'distributed.worker.memory.target': 0.75})  # Spill to disk at 75% usage
+    dask.config.set({'distributed.worker.memory.spill': 0.8})   # Start spilling at 80%
+    dask.config.set({'distributed.worker.memory.pause': 0.9})   # Pause worker at 90%
+
     # Remap the data to the target grid
     temp_output_dir = path_data_processed / "cerra_processed" / "temp" / args.variable
     temp_output_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +79,26 @@ if __name__ == "__main__":
             "conservative",
             path_data_processed / "climate_grids" / climate_grid_file,
         )
+
+    for sim_path in temp_output_dir.glob("*.nc"):
+        ds = xr.open_dataset(sim_path)
+        print(f"Processing {sim_path.name}...")
+        modified = False
+        has_duplicates = has_duplicate_coords(ds)
+        if any(has_duplicates.values()):
+            modified = True
+            for dim, has_dup in has_duplicates.items():
+                if has_dup:
+                    print(f"  Dropping duplicate coordinates along {dim} dimension.")
+                    ds = ds.drop_duplicates(dim)
+        if not is_time_sorted(ds):
+            print("  Sorting time coordinate.")
+            modified = True
+            ds = ds.sortby("time")
+        if modified:
+            ds = ds.load()
+            sim_path.unlink()
+            ds.to_netcdf(sim_path)
 
     # Process the remapped data
     extent = None
@@ -91,10 +131,10 @@ if __name__ == "__main__":
 
     if (output_path / f"{args.variable}.zarr").exists():
         shutil.rmtree(output_path / f"{args.variable}.zarr")
-
-    reanalysis_data.ds_data.chunk(target_chunks).to_zarr(
-        output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
-    )
+    with ProgressBar(dt=60):
+        reanalysis_data.ds_data.chunk(target_chunks).to_zarr(
+            output_path / f"{args.variable}.zarr", mode="w", encoding=zarr_encoding
+        )
 
     shutil.rmtree(temp_output_dir)
 

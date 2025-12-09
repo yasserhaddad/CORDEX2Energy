@@ -1,3 +1,4 @@
+import os
 import sys
 
 sys.path.append("../..")
@@ -6,10 +7,27 @@ import json
 import time
 from pathlib import Path
 
+import dask
+from dask.diagnostics import ProgressBar
 import xarray as xr
 import numpy as np
 from src.utils.cdo_commands import cdo_setgrid
 from src.utils.utils_xarray import check_contiguous_years, fill_missing_years_with_climatology
+import re
+
+os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
+
+dask.config.set({"logging.distributed": "error"})
+# dask.config.set(num_workers=16, threads_per_worker=16, scheduler="processes")
+dask.config.set(num_workers=16, threads_per_worker=16)
+dask.config.set({"array.chunk-size": "400MiB"})
+
+dask.config.set({'distributed.worker.memory.target': 0.75})  # Spill to disk at 75% usage
+dask.config.set({'distributed.worker.memory.spill': 0.8})   # Start spilling at 80%
+dask.config.set({'distributed.worker.memory.pause': 0.9})   # Pause worker at 90%
 
 with open("../../paths_so4.json") as f:
     paths = json.load(f)
@@ -17,10 +35,9 @@ with open("../../paths_so4.json") as f:
 path_data_processed = Path(paths["path_data_processed"])
 path_data_cerra_land = Path(paths["path_data_cerra_land"])
 
-sro_cerra_path = sorted((path_data_cerra_land / "original" / "sro").glob("*.nc"))[:-1]
-perc_cerra_path = sorted(
-    (path_data_cerra_land / "original" / "perc").glob("*.nc")
-)[:-1]
+sro_files = sorted((path_data_cerra_land / "original" / "sro").glob("*.nc"))
+perc_files = sorted((path_data_cerra_land / "original" / "perc").glob("*.nc"))
+
 grid_path = path_data_processed / "climate_grids" / "grid_cerra_griddes.txt"
 
 ro_cerra_path = path_data_processed / "cerra_processed" / "ro"
@@ -28,12 +45,13 @@ ro_cerra_path.mkdir(parents=True, exist_ok=True)
 
 t_start = time.time()
 print("Loading data")
-
-ds_sro = xr.open_mfdataset(sro_cerra_path, combine="by_coords")
-ds_perc = xr.open_mfdataset(perc_cerra_path, combine="by_coords")
-
-ds_sro = ds_sro.resample(time='1D').sum().compute()
-ds_perc = ds_perc.resample(time='1D').sum().compute()
+with ProgressBar(dt=1):
+    print("Loadding sro and perc data")
+    ds_sro = xr.open_mfdataset(sro_files, combine="by_coords", parallel=True)
+    ds_perc = xr.open_mfdataset(perc_files, combine="by_coords", parallel=True)
+    print("Resampling to daily data")
+    ds_sro = ds_sro.resample(time='1D').sum().compute()
+    ds_perc = ds_perc.resample(time='1D').sum().compute()
 
 print(f"\Time to load: {(time.time() - t_start) / 60:.2f} minutes.")
 time_interm = time.time()
@@ -64,7 +82,7 @@ ds_ro = xr.Dataset(
     },
     coords=ds_sro.coords,
 )
-ds_ro["Lambert_Conformal"] = xr.open_dataset(sro_cerra_path[0])["Lambert_Conformal"]
+ds_ro["Lambert_Conformal"] = xr.open_dataset(list(sro_files)[0])["Lambert_Conformal"]
 ds_ro["ro"].attrs = {
     "long_name": "Runoff",
     "units": "kg m**-2",
@@ -77,6 +95,8 @@ time_interm = time.time()
 print("Saving runoff data")
 for year in np.unique(ds_ro["time.year"].values):
     output_path = ro_cerra_path / f"ro_day_cerra-land_{year}.nc"
+    if output_path.exists():
+        output_path.unlink()
     temp_output_path = output_path.with_name(f"temp_{output_path.name}")
     ds_ro.sel(time=str(year)).to_netcdf(temp_output_path)
 

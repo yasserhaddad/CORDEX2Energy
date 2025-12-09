@@ -76,6 +76,7 @@ DICT_DEFAULT_XCLIM_PARAMETERS = {
         "extrapolation": "constant",
         "interp": "linear",
         "adapt_freq_thresh": "0.1 mm d-1",
+        "jitter_under_thresh_value": "0.001 mm d-1",
     },
     "tas": {
         "nquantiles": 99,
@@ -112,6 +113,13 @@ DICT_DEFAULT_XCLIM_PARAMETERS = {
         "interp": "linear",
         "adapt_freq_thresh": None,
     },
+    "ps": {
+        "nquantiles": 99,
+        "adjustment_kind": "+",
+        "extrapolation": "constant",
+        "interp": "linear",
+        "adapt_freq_thresh": None,
+    },
     "rsds": {
         "nquantiles": 99,
         "adjustment_kind": "*",
@@ -130,7 +138,7 @@ DICT_DEFAULT_XCLIM_PARAMETERS = {
     },
     "clt": {
         "nquantiles": 99,
-        "adjustment_kind": "*",
+        "adjustment_kind": "+",
         "extrapolation": "constant",
         "interp": "linear",
         "adapt_freq_thresh": None,

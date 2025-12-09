@@ -18,15 +18,24 @@ from src.data_processing.test_climate_data import (
     has_duplicate_coords,
     has_identical_random_timesteps,
     is_time_sorted,
+    has_complete_timesteps,
 )
-from src.data_processing.timesteps_adjustments import extract_adjusted_timesteps
+from src.data_processing.timesteps_adjustments import (
+    extract_adjusted_timesteps,
+    fill_missing_timesteps,
+    fill_missing_timesteps_ffill_like,
+)
 from src.utils.cdo_commands import cdo_remap
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_BC_MRRO, REGRIDDED_CHUNKS
+from src.utils.constants import (
+    COMPRESSED_ZARR_ENCODING,
+    EXTENT_BC_MRRO,
+    REGRIDDED_CHUNKS,
+)
 from src.utils.utils_load_data import get_raw_cordex_data_paths
 
 
 def extract_year(path_cordex: Path) -> int:
-    return int(path_cordex.stem.split("_")[-1][:4])
+    return int(path_cordex.stem.split("-")[-1][:4])
 
 
 def get_adjusted_timesteps(
@@ -62,13 +71,14 @@ if __name__ == "__main__":
     os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
 
     dask.config.set({"logging.distributed": "error"})
-    # dask.config.set(num_workers=16, threads_per_worker=16, scheduler="processes")
     dask.config.set(num_workers=16, threads_per_worker=16)
     dask.config.set({"array.chunk-size": "400MiB"})
 
-    dask.config.set({'distributed.worker.memory.target': 0.75})  # Spill to disk at 75% usage
-    dask.config.set({'distributed.worker.memory.spill': 0.8})   # Start spilling at 80%
-    dask.config.set({'distributed.worker.memory.pause': 0.9})   # Pause worker at 90%
+    dask.config.set(
+        {"distributed.worker.memory.target": 0.75}
+    )  # Spill to disk at 75% usage
+    dask.config.set({"distributed.worker.memory.spill": 0.8})  # Start spilling at 80%
+    dask.config.set({"distributed.worker.memory.pause": 0.9})  # Pause worker at 90%
 
     paths = json.load(open(args.paths_file))
 
@@ -100,6 +110,7 @@ if __name__ == "__main__":
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "temp"
         / args.variable
+        / args.temp_res
     )
 
     temp_output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,8 +153,70 @@ if __name__ == "__main__":
         f"\tRemapping time for variable {args.variable}: {(time() - time_start) / 60:.2f} minutes."
     )
 
-    # chunks = None
-    chunks = {"time": 150}
+    if args.climate_model_chain == "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1":
+        print("\tCombining split year files...")
+        import subprocess
+        from collections import defaultdict
+
+        def combine_split_files_across_directories(hist_dir, future_dir):
+            """Combine files that are split within the same year, potentially across hist and future directories."""
+            files_by_year = defaultdict(list)
+
+            # Group files by year from both directories
+            for nc_file in hist_dir.glob("*.nc"):
+                year = extract_year(nc_file)
+                files_by_year[year].append(nc_file)
+
+            for nc_file in future_dir.glob("*.nc"):
+                year = extract_year(nc_file)
+                files_by_year[year].append(nc_file)
+
+            # Process each year
+            for year, files in files_by_year.items():
+                if len(files) > 1:
+                    # Multiple files for same year - combine them
+                    print(f"\t  Combining {len(files)} files for year {year}")
+                    files_sorted = sorted(files, key=lambda x: x.name)
+
+                    # Determine output directory based on first file's location
+                    output_dir = files_sorted[0].parent
+                    output_file = files_sorted[0]
+                    temp_output = output_dir / f"temp_combined_{year}.nc"
+
+                    try:
+                        cmd = ["cdo", "mergetime"] + [str(f) for f in files_sorted] + [str(temp_output)]
+                        subprocess.run(cmd, check=True, capture_output=True)
+
+                        # Remove original files and rename combined file
+                        for f in files_sorted:
+                            f.unlink()
+                        temp_output.rename(output_file)
+                        print(f"\t    ✓ Combined into: {output_file.name} in {output_dir.name}/")
+                    except subprocess.CalledProcessError as e:
+                        print(f"\t    ✗ Failed to combine files for year {year}: {e}")
+                        if temp_output.exists():
+                            temp_output.unlink()
+                        raise
+
+        combine_split_files_across_directories(temp_output_dir / "hist", temp_output_dir / "future")
+        print("\t✓ File combination completed")
+
+        print("\tConverting 360-day calendar to Gregorian...")
+        convert_script = Path(__file__).parent / "convert_360_day_calendar.py"
+
+        try:
+            subprocess.run([
+                sys.executable,
+                str(convert_script),
+                str(temp_output_dir),
+                "--recursive"
+            ], check=True)
+            print("\t✓ Calendar conversion completed")
+        except subprocess.CalledProcessError as e:
+            print(f"\t✗ Calendar conversion failed: {e}")
+            raise
+
+    chunks = None
     extent = EXTENT_BC_MRRO if args.variable == "mrro" else None
 
     climate_data = ClimateModelData(
@@ -157,16 +230,27 @@ if __name__ == "__main__":
     )
 
     print("\tChecking time coordinates and duplicates...")
+    print("\tChecking time sorting...")
     if not is_time_sorted(climate_data.ds_data):
         print("Time coordinate is not sorted. Sorting now...")
         climate_data.ds_data = climate_data.ds_data.sortby("time")
 
+    print("\tChecking duplicate time coordinates...")
     if has_duplicate_coords(climate_data.ds_data)["time"]:
         print("Dataset contains duplicate time coordinates. Removing duplicates...")
         climate_data.ds_data = climate_data.ds_data.drop_duplicates(dim="time")
 
+    print("\tChecking identical random timesteps...")
     if has_identical_random_timesteps(climate_data.ds_data):
         print("Dataset contains identical random timesteps.")
+
+    print("\tChecking complete timesteps...")
+    if not has_complete_timesteps(climate_data.ds_data, drop_leap_days=True):
+        print("Dataset is missing expected timesteps.")
+        # climate_data.ds_data = fill_missing_timesteps(climate_data.ds_data.chunk(REGRIDDED_CHUNKS), drop_leap_days=True)
+        climate_data.ds_data = fill_missing_timesteps_ffill_like(
+            climate_data.ds_data.chunk(REGRIDDED_CHUNKS), drop_leap_days=True
+        )
 
     print("\tSaving processed dataset...")
     output_path = (

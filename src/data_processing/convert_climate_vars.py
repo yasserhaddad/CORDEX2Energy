@@ -59,7 +59,6 @@ def calculate_specific_humidity(
         e = rh * e_s / 100
         # Calculate specific humidity (q) from actual vapor pressure and surface pressure
         q = 0.622 * (e / sp)
-        # q = 0.622 * e / (sp - (1 - 0.622) * e)
 
         return q
 

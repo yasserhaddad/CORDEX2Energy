@@ -10,7 +10,7 @@ model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
 
-scenario="rcp85"
+scenario="rcp45"
 
 
 current_date=$(date +"%Y%m%d")
@@ -23,21 +23,20 @@ scope="ch"
 mkdir -p "logs/${scope}/${model}_${scenario}"
 
 # echo "Computing wind power for scope ${scope}..."
-# nice -10 python -u compute_wind_power_${scope}.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
+# nice -10 python -u compute_wind_power.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
 
 # echo "Computing PV for scope ${scope}..."
-# nice -10 python -u compute_pv_${scope}.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
-
+# nice -10 python -u compute_pv.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
 
 scope="europe"
 # Create a directory for logs if it doesn't exist
 mkdir -p "logs/${scope}/${model}_${scenario}"
 
-# echo "Computing wind power for scope ${scope}..."
-# nice -10 python -u compute_wind_power_${scope}.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
+echo "Computing wind power for scope ${scope}..."
+nice -10 python -u compute_wind_power.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
 
-echo "Computing PV for scope ${scope}..."
-nice -10 python -u compute_pv_${scope}.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
+# echo "Computing PV for scope ${scope}..."
+# nice -10 python -u compute_pv.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
 
 # echo "Computing hydropower..."
 # nice -10 python -u compute_hydropower.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/hydropower_${current_date}.log"

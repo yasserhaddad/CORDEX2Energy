@@ -1,10 +1,3 @@
-# import os
-
-# os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
-# os.environ["MKL_NUM_THREADS"] = "1"  # MKL
-# os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
-# os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
-
 import sys
 
 import pandas as pd
@@ -82,7 +75,6 @@ if __name__ == "__main__":
 
     if args.nr_processes > 1:
         dask.config.set(num_workers=args.nr_processes, scheduler="processes")
-        # dask.config.set(num_workers=args.nr_processes, threads_per_worker=1)
 
         dask.config.set({
             "distributed.worker.memory.target": 0.7,  # Spill to disk at 70%
@@ -146,7 +138,7 @@ if __name__ == "__main__":
 
     if args.variable == "pr":
         if climate_data.ds_data[args.variable].units == "kg m-2 s-1":
-            climate_data.ds_data = climate_data.ds_data * 86400
+            climate_data.ds_data = climate_data.ds_data * 24 * 3600
             climate_data.ds_data[args.variable].attrs["units"] = "mm d-1"
             print("Climate data units converted to mm d-1.")
         if reanalysis_data.ds_data[args.variable_ref].units == "kg m**-2":
@@ -183,7 +175,7 @@ if __name__ == "__main__":
 
     if args.variable == "mrro":
         if climate_data.ds_data[args.variable].units == "kg m-2 s-1":
-            climate_data.ds_data = climate_data.ds_data * 86400
+            climate_data.ds_data = climate_data.ds_data * 24 * 3600
             climate_data.ds_data[args.variable].attrs["units"] = "kg m-2"
             print("Climate data units converted to kg m-2.")
         if "lev" in reanalysis_data.ds_data.coords:
@@ -230,6 +222,7 @@ if __name__ == "__main__":
         / "temp"
         / "bias_corrected"
         / args.variable
+        / args.temp_res
     )
     temp_output_dir.mkdir(exist_ok=True, parents=True)
 
@@ -253,8 +246,8 @@ if __name__ == "__main__":
         print_time=True,
     )
 
-    # Limit relative humidity and cloud cover fraction to [0, 100]
-    if args.variable == "hurs" or args.variable == "clt":
+    # Limit cloud cover fraction to [0, 100]
+    if args.variable == "clt":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
         print("Values clipped to [0, 100].")
 

@@ -21,10 +21,11 @@ dask.config.set(
     }
 )
 
-variable = "tas"
+variable = "psl"
+climate_scenario = "rcp85"
 path_zarr = [
-    Path(f"/landclim/yhaddad/clim2energy-ch/cordex_processed/CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp85/bias_corrected/3hr/{variable}.zarr"),
-    Path(f"/landclim_nobackup/yhaddad/clim2energy-ch/cordex_processed/CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp85/temp/bias_corrected/{variable}/{variable}_hour_0.zarr")
+    Path(f"/landclim/yhaddad/clim2energy-ch/cordex_processed/CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_{climate_scenario}/bias_corrected/3hr/{variable}.zarr"),
+    Path(f"/landclim_nobackup/yhaddad/clim2energy-ch/cordex_processed/CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_{climate_scenario}/temp/bias_corrected/{variable}/{variable}_hour_0.zarr")
 ]
 with ProgressBar(dt=1):
     datasets = [

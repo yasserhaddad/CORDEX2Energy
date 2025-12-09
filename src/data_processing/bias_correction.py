@@ -272,7 +272,7 @@ class BiasCorrection:
         print("Contactenating saved data...")
 
         datasets = [
-            xr.open_zarr(output_path / f"{data_var}_hour_{hour}.zarr").load()
+            xr.open_zarr(output_path / f"{data_var}_hour_{hour}.zarr", chunks="auto").load()
             for hour in hours
         ]
         ds_climate_model_data_future_debiased = xr.concat(datasets, dim="time").sortby("time")

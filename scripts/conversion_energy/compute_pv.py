@@ -23,7 +23,12 @@ from src.conversion_energy.pv import (
     compute_pv_from_config,
 )
 from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
+from src.utils.constants import (
+    COMPRESSED_ZARR_ENCODING,
+    BC_SUBDAILY_CHUNKS,
+    EXTENT_BC,
+    EXTENT_CH,
+)
 from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
 from src.conversion_energy.aggregate_data import aggregate_data_per_country
 
@@ -34,9 +39,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("climate_model_chain", type=str, help="Climate model chain.")
     parser.add_argument("climate_scenario", type=str, help="Climate scenario.")
+    parser.add_argument("scope", type=str, help="Scope: europe or ch")
 
     args = parser.parse_args()
     paths = json.load(open(args.paths_file))
+
+    if args.scope not in ["europe", "ch"]:
+        raise ValueError("Scope must be 'europe' or 'ch'")
 
     path_data_processed = Path(paths["path_data_processed"])
     path_data_temporary = Path(paths["path_data_temporary"])
@@ -48,7 +57,7 @@ if __name__ == "__main__":
 
     output_path_solar = (
         path_energy
-        / "europe"
+        / args.scope
         / "pv"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
     )
@@ -57,7 +66,7 @@ if __name__ == "__main__":
     output_path_temp_solar = (
         path_data_temporary
         / "energy"
-        / "europe"
+        / args.scope
         / "pv"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
     )
@@ -65,25 +74,27 @@ if __name__ == "__main__":
 
     # dask.config.set(num_workers=15, scheduler="processes")
     dask.config.set(num_workers=15, threads_per_worker=16)
-    dask.config.set({
-        "distributed.worker.memory.target": 0.7,  # Spill to disk at 70%
-        "distributed.worker.memory.spill": 0.8,   # Start spilling at 80%
-        "distributed.worker.memory.pause": 0.9,   # Pause worker at 90%
-        "array.chunk-size": "512MiB",
-        "logging.distributed": "error",           # Less verbose logs
-    })
+    dask.config.set(
+        {
+            "distributed.worker.memory.target": 0.7,  # Spill to disk at 70%
+            "distributed.worker.memory.spill": 0.8,  # Start spilling at 80%
+            "distributed.worker.memory.pause": 0.9,  # Pause worker at 90%
+            "array.chunk-size": "512MiB",
+            "logging.distributed": "error",  # Less verbose logs
+        }
+    )
 
     time_start = time.time()
 
     print("Loading data")
-    extent = {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-    ds_tas_bc = ClimateModelData(
+    extent = EXTENT_BC if args.scope == "europe" else EXTENT_CH
+    ds_rsds_bc = ClimateModelData(
         path_data_processed
         / "cordex_processed"
         / f"{args.climate_model_chain}_{args.climate_scenario}"
         / "bias_corrected"
         / "3hr"
-        / "tas.zarr",
+        / "rsds.zarr",
         extent=extent,
         chunks="auto",
     )
@@ -102,14 +113,20 @@ if __name__ == "__main__":
         ),
         extent,
     )
-    # ds_orog = ds_orog.chunk({k: v for k, v in BC_SUBDAILY_CHUNKS.items() if k in ds_orog.dims})
     ds_orog = ds_orog.chunk({"lat": 20, "lon": 20})
-    step = 20
+    step = 30
     # Determine time slices based on ds_tas_bc time range
-    time_index = pd.to_datetime(ds_tas_bc.ds_data.time.values)
+    time_index = pd.to_datetime(ds_rsds_bc.ds_data.time.values)
     start_year = time_index.year.min()
     end_year = time_index.year.max()
-    time_slices = [(start, min(start + step - 1, end_year)) for start in range(start_year, end_year + 1, step)]
+    time_slices = (
+        [
+            (start, min(start + step - 1, end_year))
+            for start in range(start_year, end_year + 1, step)
+        ]
+        if args.scope == "europe"
+        else [(start_year, end_year)]
+    )
     for start_year, end_year in time_slices:
         print(f"Processing data for {start_year}-{end_year}")
         output_path_zarr = (
@@ -122,10 +139,7 @@ if __name__ == "__main__":
             / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_{start_year}_{end_year}.nc"
         )
 
-        # if output_path_zarr.exists() and output_path_agg.exists():
-        #     print(f"Output files already exist for {start_year}-{end_year}. Skipping.")
-        #     continue
-        if output_path_zarr.exists():
+        if output_path_zarr.exists() and output_path_agg.exists():
             print(f"Output files already exist for {start_year}-{end_year}. Skipping.")
             continue
 
@@ -165,7 +179,15 @@ if __name__ == "__main__":
         ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=time_slice)
         ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=time_slice)
         ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(time=time_slice)
-
+        # Check if all datasets have the same lat, lon, and time
+        for coord in ["lat", "lon"]:
+            arrs = [
+                ds_rsds_bc.ds_data[coord].values,
+                ds_tas_bc.ds_data[coord].values,
+                ds_sfcWind_bc.ds_data[coord].values,
+            ]
+            if not all((arrs[0] == arr).all() for arr in arrs):
+                raise ValueError(f"Mismatch in {coord} coordinates among datasets.")
         print("Matching instantaneous to mean values")
         with ProgressBar(dt=60):
             ds_tas_bc.ds_data = match_instaneous_to_mean_values(
@@ -174,42 +196,68 @@ if __name__ == "__main__":
             ds_tas_bc.ds_data["time"] = ds_tas_bc.ds_data["time"] + pd.Timedelta(
                 hours=1, minutes=30
             )
+            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=ds_rsds_bc.ds_data.time)
 
             ds_sfcWind_bc.ds_data = match_instaneous_to_mean_values(
                 ds_sfcWind_bc.ds_data, skip_leap_days=True, time_res="3h"
             ).persist()
-            ds_sfcWind_bc.ds_data["time"] = ds_sfcWind_bc.ds_data["time"] + pd.Timedelta(
-                hours=1, minutes=30
+            ds_sfcWind_bc.ds_data["time"] = ds_sfcWind_bc.ds_data[
+                "time"
+            ] + pd.Timedelta(hours=1, minutes=30)
+            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(
+                time=ds_rsds_bc.ds_data.time
             )
 
-
-
-
         step_start = time.time()
-        azimuth = 180
-        direction = "S"
-        tilt = 35
+        azimuths = (
+            {"S": 180}
+            if args.scope == "europe"
+            else {"E": 90, "SE": 135, "S": 180, "SW": 225, "W": 270, "N": 0}
+        )
+        tilts = [35] if args.scope == "europe" else [3, 8, 15, 25, 35, 45, 60, 80, 90]
 
         pv_step_start = time.time()
         step_start = time.time()
 
-        print(f"Computing PV data for {direction} direction and {tilt} degrees tilt")
-
         with ProgressBar(dt=60):
-            print("\tComputing spatially-resolved PV...")
-            ds_pv = (
-                compute_pv_from_config(
-                    ds_rsds_bc.ds_data.rsds.chunk({"time": -1, "lat": 20, "lon": 20}),
-                    ds_tas_bc.ds_data.tas.chunk({"time": -1, "lat": 20, "lon": 20}),
-                    ds_sfcWind_bc.ds_data.sfcWind.chunk({"time": -1, "lat": 20, "lon": 20}),
-                    tilt=tilt,
-                    azimuth=azimuth,
-                    pv_configuration=NORMALISED_ROOFTOP_PV_CONFIGURATION,
-                    altitude=ds_orog.orog,
-                ).rename({"ac_power": f"tilt_{tilt}_azimuth_{direction}"})
-                / NORMALISED_ROOFTOP_PV_CONFIGURATION["module_parameters"]["pdc0"]
-            )
+            ds_pv = []
+            ds_pv_agg = []
+            for direction, azimuth in azimuths.items():
+                for tilt in tilts:
+                    print(
+                        f"Computing PV data for {direction} direction and {tilt} degrees tilt"
+                    )
+                    ds_pv.append(
+                        compute_pv_from_config(
+                            ds_rsds_bc.ds_data.rsds.chunk(
+                                {"time": -1, "lat": 20, "lon": 20}
+                            ),
+                            ds_tas_bc.ds_data.tas.chunk(
+                                {"time": -1, "lat": 20, "lon": 20}
+                            ),
+                            ds_sfcWind_bc.ds_data.sfcWind.chunk(
+                                {"time": -1, "lat": 20, "lon": 20}
+                            ),
+                            tilt=tilt,
+                            azimuth=azimuth,
+                            pv_configuration=NORMALISED_ROOFTOP_PV_CONFIGURATION,
+                            altitude=ds_orog.orog,
+                        ).rename({"ac_power": f"tilt_{tilt}_azimuth_{direction}"})
+                        / NORMALISED_ROOFTOP_PV_CONFIGURATION["module_parameters"][
+                            "pdc0"
+                        ]
+                    )
 
+                    if args.scope == "europe":
+                        step_start = time.time()
+                        ds_pv_agg.append(aggregate_data_per_country(
+                            ds_pv[-1],
+                            method="median_and_better",
+                            offshore=False,
+                        ))
+
+            print("Saving data")
+            ds_pv = xr.merge(ds_pv)
             zarr_encoding = {
                 var: {
                     "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
@@ -217,27 +265,18 @@ if __name__ == "__main__":
                 }
                 for var in ds_pv.data_vars
             }
-            ds_pv.chunk(BC_SUBDAILY_CHUNKS).to_zarr(output_path_zarr, mode="w", encoding=zarr_encoding)
+            ds_pv.chunk(BC_SUBDAILY_CHUNKS).to_zarr(
+                output_path_zarr, mode="w", encoding=zarr_encoding
+            )
             print(f"PV data saved to {output_path_zarr}")
 
-            # print("\tComputing aggregated PV...")
-            # step_start = time.time()
-            # print("Aggregating PV data")
-            # ds_pv_agg = aggregate_data_per_country(
-            #     ds_pv,
-            #     method="median_and_better",
-            #     offshore=False,
-            # ).compute()
-            # print("PV data aggregation time: ", (time.time() - step_start) / 60, "minutes")
+            if len(ds_pv_agg) > 0 and args.scope == "europe":
+                ds_pv_agg = xr.merge(ds_pv_agg)
+                ds_pv_agg.to_netcdf(output_path_agg, mode="w")
+                print(f"PV aggregated data saved to {output_path_agg}")
 
-            # # Save the combined dataset to a file
-            # step_start = time.time()
-            # ds_pv_agg.to_netcdf(output_path_agg, mode="w")
-            # print(f"PV aggregated data saved to {output_path_agg}")
-            # print(f"PV data aggregation time: {(time.time() - step_start) / 60:.2f} minutes")
+            del ds_pv, ds_rsds_bc, ds_tas_bc, ds_sfcWind_bc, ds_pv_agg
 
-        del ds_pv, ds_rsds_bc, ds_tas_bc, ds_sfcWind_bc
-        # del ds_pv_agg
 
     print("Concatenating datasets...")
     with ProgressBar(dt=60):
@@ -267,20 +306,22 @@ if __name__ == "__main__":
 
         del ds_pv
 
-        # ds_pv_agg = xr.open_mfdataset(
-        #     output_path_temp_solar.glob(
-        #         f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_*.nc"
-        #     ),
-        #     combine="by_coords",
-        # )
+        if args.scope == "europe":
+            ds_pv_agg = xr.open_mfdataset(
+                output_path_temp_solar.glob(
+                    f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_*.nc"
+                ),
+                combine="by_coords",
+            )
 
-        # output_path_agg = (
-        #     output_path_solar
-        #     / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}.nc"
-        # )
-        # ds_pv_agg.compute().to_netcdf(output_path_agg, mode="w")
-        # del ds_pv_agg
+            output_path_agg = (
+                output_path_solar
+                / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}.nc"
+            )
+            ds_pv_agg.compute().to_netcdf(output_path_agg, mode="w")
+            del ds_pv_agg
 
-    shutil.rmtree(output_path_temp_solar)
+    print("Removing temporary files...")
+    shutil.rmtree(output_path_temp_solar.absolute())
 
     print("Total time: ", (time.time() - time_start) / 60, "minutes")

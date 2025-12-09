@@ -166,12 +166,16 @@ def aggregate_data_per_country(ds: xr.Dataset, method: str = "mean", offshore: b
     mask, countries = create_country_offshore_mask(ds, path_eez_file) if offshore else create_country_mask(ds)
     mask = mask.fillna(-1)
 
-    if method not in ["mean", "median_and_better"]:
-        raise ValueError(f"Method '{method}' is not supported. Use 'mean' or 'median_and_better'.")
+    if method not in ["mean", "median_and_better", "sum"]:
+        raise ValueError(f"Method '{method}' is not supported. Use 'mean', 'sum' or 'median_and_better'.")
     if method == "mean":
         ds = ds.groupby(mask).mean(dim=["lat", "lon"], skipna=True)
+    elif method == "sum":
+        ds = ds.groupby(mask).sum(dim=["lat", "lon"], skipna=True)
     elif method == "median_and_better":
-        mean_time = ds.mean(dim="time", skipna=True).compute()
+        mean_time = ds.mean(dim="time", skipna=True)
+        if ds.isel(time=0).isnull().any():
+            mean_time = mean_time.compute()
         ref = mean_time.groupby(mask).median(skipna=True)  # median per country
         ref_broadcasted = xr.merge([xr.apply_ufunc(
             lambda country_id: ref[var].sel(country=country_id),

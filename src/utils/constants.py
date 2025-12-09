@@ -20,6 +20,7 @@ MID_CENTURY_PERIOD = ["2041", "2060"]
 EXTENT_BC = {"lat_min": 30, "lat_max": 75, "lon_min": -30, "lon_max": 41}
 EXTENT_BC_MRRO = {"lat_min": 20.8, "lat_max": 71.8, "lon_min": -51.7, "lon_max": 72.7}
 EXTENT_CH = {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
+EXTENT_PREVAH = {"lat_min": 44.4, "lat_max": 48.6, "lon_min": 4.5, "lon_max": 16.5}
 
 REGRIDDED_CHUNKS = {"time": -1, "lat": 20, "lon": 20}
 BC_DAILY_CHUNKS = {"time": 365, "lat": 256, "lon": 256}

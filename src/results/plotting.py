@@ -407,9 +407,9 @@ def plot_ensemble_mean(ds: xr.Dataset, figsize=(18, 5), country_border_width: fl
     """
     var_names = list(ds.data_vars.keys())
     var_titles = {
-        "pv": "Solar Power",
-        "wind": "Wind Power",
-        "hydropower": "Hydropower",
+        "pv": "Solar Power Potential",
+        "wind": "Wind Power Potential",
+        "hydropower": "Hydropower Potential",
         "HDD": "Heating Degree Days",
         "CDD": "Cooling Degree Days",
     }
@@ -501,9 +501,9 @@ def plot_ensemble_mean_percentage_change(
     """
     var_names = list(ref_dataset.data_vars.keys())
     var_titles = {
-        "pv": "Solar Power",
-        "wind": "Wind Power",
-        "hydropower": "Hydropower",
+        "pv": "Solar Power Potential",
+        "wind": "Wind Power Potential",
+        "hydropower": "Hydropower Potential",
         "HDD": "Heating Degree Days",
         "CDD": "Cooling Degree Days",
     }
@@ -707,17 +707,17 @@ def plot_yearly_timeseries_ensemble(
             )
             if var in ["pv", "wind"]:
                 ax.set_ylim(wind_solar_vmin - 0.02, wind_solar_vmax + 0.02)
-            ax.set_ylabel(var_ylabel.get(var, ""), fontsize=FONTSIZE_LABELS)
-            ax.set_title(f"{var_titles.get(var, var)}", fontsize=FONTSIZE_LABELS)
-            ax.tick_params(axis="both", labelsize=FONTSIZE_TICKS)
-            # Show only every other xtick to reduce clutter
-            # Set x-axis limits to match data range to avoid empty space
-            xticklocs = ax.get_xticks()
-            xticklabels = [label.get_text() for label in ax.get_xticklabels()]
-            # Show only every other label
-            new_labels = [label if i % 2 == 0 else "" for i, label in enumerate(xticklabels[:-1])]
-            ax.set_xticks(xticklocs[:-1])
-            ax.set_xticklabels(new_labels)
+        ax.set_ylabel(var_ylabel.get(var, ""), fontsize=FONTSIZE_LABELS)
+        ax.set_title(f"{var_titles.get(var, var)}", fontsize=FONTSIZE_LABELS)
+        ax.tick_params(axis="both", labelsize=FONTSIZE_TICKS)
+        # Show only every other xtick to reduce clutter
+        # Set x-axis limits to match data range to avoid empty space
+        xticklocs = ax.get_xticks()
+        xticklabels = [label.get_text() for label in ax.get_xticklabels()]
+        # Show only every other label
+        new_labels = [label if (i+1) % 2 == 0 else "" for i, label in enumerate(xticklabels[:-1])]
+        ax.set_xticks(xticklocs[:-1])
+        ax.set_xticklabels(new_labels)
 
 
 
@@ -738,3 +738,17 @@ def plot_yearly_timeseries_ensemble(
         path_savefig.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(path_savefig, dpi=300, bbox_inches="tight")
     plt.show()
+
+
+def plot_interval_strip_regions(
+    ds: xr.Dataset,
+    selected_regions: list[str],
+    time_dim: str = "time",
+    model_dim: str = "model",
+    region_dim: str = "mask",
+    window_length: int = 20,
+    figsize=(10, 5),
+    title: str = "Gradient",
+    path_savefig: Path = None
+):
+    return

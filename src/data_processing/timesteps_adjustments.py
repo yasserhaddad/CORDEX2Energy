@@ -3,6 +3,8 @@ from typing import Dict, Union
 import xarray as xr
 import pandas as pd
 
+from ..utils.utils_xarray import get_time_resolution
+
 
 def extract_adjusted_timesteps(
     df_climate_models_mapping: pd.DataFrame,
@@ -146,3 +148,104 @@ def timedelta_to_freq(timedelta: Union[pd.Timedelta, datetime.timedelta]) -> str
         return f"{microseconds}us"
     else:
         raise ValueError("Cannot determine frequency for zero timedelta.")
+
+def fill_missing_timesteps(ds: xr.Dataset, drop_leap_days: bool = True) -> xr.Dataset:
+    """
+    Expand the time dimension of the dataset to include all expected timesteps and interpolate missing values.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input xarray Dataset containing a 'time' dimension.
+    drop_leap_days : bool, optional
+        If True, drop February 29 from the expected timeseries before comparison.
+
+    Returns
+    -------
+    xr.Dataset
+        The dataset with filled timesteps.
+    """
+    times = pd.DatetimeIndex(ds["time"].values)
+    # remove timezone awareness for comparison
+    if times.tz is not None:
+        times = times.tz_convert(None)
+
+    times = times.sort_values().unique()
+    freq = pd.infer_freq(times)
+    if freq is None:
+        # fallback: use the mode of the diffs
+        diffs = times.to_series().diff().dropna()
+        mode = diffs.mode()
+        freq = mode.iloc[0]
+
+    expected = pd.date_range(start=times[0], end=times[-1], freq=freq)
+
+    if drop_leap_days:
+        expected = expected[~((expected.month == 2) & (expected.day == 29))]
+
+    # Reindex dataset to include all expected timesteps
+    ds_filled = ds.reindex(time=expected)
+
+    # Interpolate missing values
+    ds_filled = ds_filled.interpolate_na(dim="time", method="linear", fill_value="extrapolate")
+
+    return ds_filled
+
+def fill_missing_timesteps_ffill_like(ds: xr.Dataset, drop_leap_days: bool = True) -> xr.Dataset:
+    """
+    Expand the time dimension to include all expected timesteps and fill missing values.
+    Daily data uses simple forward-fill; subdaily data forward-fills based on matching time-of-day.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        The input dataset with a 'time' dimension.
+    drop_leap_days : bool, optional
+        Whether to drop February 29 when generating expected timestamps.
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with missing timesteps filled using forward-fill logic.
+    """
+    # ---- Detect frequency ----
+    times = pd.DatetimeIndex(ds["time"].values)
+    if times.tz is not None:
+        times = times.tz_convert(None)
+
+    times = times.sort_values().unique()
+    freq = pd.infer_freq(times)
+
+    if freq is None:
+        diffs = times.to_series().diff().dropna()
+        freq = diffs.mode().iloc[0]
+
+    expected = pd.date_range(start=times[0], end=times[-1], freq=freq)
+
+    if drop_leap_days:
+        expected = expected[~((expected.month == 2) & (expected.day == 29))]
+
+    # ---- Reindex to full timeline ----
+    ds = ds.reindex(time=expected)
+
+    # ---- DAILY CASE → simple forward fill ----
+    if freq == "D":
+        return ds.ffill(dim="time")
+
+    # ---- SUBDAILY CASE → forward fill by time-of-day ----
+    time_res = get_time_resolution(ds)
+    # # how many periods make up one day
+    periods_per_day = int(round(pd.Timedelta(days=1) / time_res))
+    if periods_per_day >= 1:
+        # shift data by one day (in periods) so value at t comes from t - 1 day
+        ds_prev_day = ds.shift(time=periods_per_day)
+        # fill NaNs with previous-day same time-of-day values
+        ds = ds.where(
+            ~ds.isnull(), ds_prev_day
+        )
+        del ds_prev_day
+
+    # fallback: forward-fill any remaining NaNs along time
+    ds = ds.ffill(dim="time")
+
+    return ds

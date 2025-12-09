@@ -1,3 +1,4 @@
+import os
 import sys
 
 sys.path.append("../..")
@@ -15,14 +16,22 @@ from scipy.ndimage import gaussian_filter, gaussian_filter1d
 from src.conversion_energy.wind import compute_power_law_exponent
 from src.data_processing.load_data import ClimateReanalysisData
 from src.utils.constants import REFERENCE_PERIOD
+import argparse
 
 
 def configure_dask():
-    dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
-    dask.config.set({"distributed.worker.use-file-locking": "False"})
+    os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+    os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
+
     dask.config.set({"logging.distributed": "error"})
-    dask.config.set(num_workers=15, scheduler="processes")
-    dask.config.set({"array.chunk-size": "500MiB"})
+    dask.config.set(num_workers=16, threads_per_worker=16)
+    dask.config.set({"array.chunk-size": "400MiB"})
+    dask.config.set({'distributed.worker.memory.target': 0.75})  # Spill to disk at 75% usage
+    dask.config.set({'distributed.worker.memory.spill': 0.8})   # Start spilling at 80%
+    dask.config.set({'distributed.worker.memory.pause': 0.9})   # Pause worker at 90%
+
 
 
 def load_paths(paths_file):
@@ -53,7 +62,7 @@ def calculate_alpha(ds_ws, heights):
 
 
 # -------------------- Group by Synthetic Time --------------------
-def group_by_synthetic_time(da_alpha):
+def group_by_synthetic_time_and_aggregate(da_alpha, aggregation_method="mean"):
     month = da_alpha.time.dt.month
     day = da_alpha.time.dt.day
     hour = da_alpha.time.dt.hour
@@ -68,8 +77,11 @@ def group_by_synthetic_time(da_alpha):
     da_alpha = (
         da_alpha.assign_coords(time_key=("time", time_key.data))
         .groupby("time_key")
-        .mean("time")
     )
+    if aggregation_method == "median":
+        da_alpha = da_alpha.median(dim="time", skipna=True)
+    else:
+        da_alpha = da_alpha.mean(dim="time", skipna=True)
     synthetic_times = pd.date_range("2001-01-01", periods=365 * 8, freq="3h")
     da_alpha = da_alpha.assign_coords(time_key=("time_key", synthetic_times)).rename(
         {"time_key": "time"}
@@ -120,8 +132,21 @@ def save_dataarrays(output_path, dataarrays, filenames):
 # -------------------- Main Pipeline --------------------
 def main():
     start_time = time.time()
+    parser = argparse.ArgumentParser(description="Compute wind speed alpha with optional smoothing")
+    parser.add_argument("--paths_file", type=str, required=True, help="Path to the JSON file containing paths.")
+    parser.add_argument("--aggregation_method", type=str, default="median", help="Aggregation method for alpha calculation.")
+    parser.add_argument(
+        "--do_temporal", action="store_true", help="Apply temporal smoothing."
+    )
+    parser.add_argument(
+        "--do_spatial", action="store_true", help="Apply spatial smoothing, on top of temporal smoothing."
+    )
+    args = parser.parse_args()
+    if args.aggregation_method not in ["mean", "median"]:
+        raise ValueError("aggregation_method must be either 'mean' or 'median'")
+
     configure_dask()
-    path_data_processed = load_paths("../../paths_so4.json")
+    path_data_processed = load_paths(args.paths_file)
     ws_cerra_path = path_data_processed / "cerra_processed" / "regridded" / "ws.zarr"
     ws_10m_cerra_path = (
         path_data_processed / "cerra_processed" / "regridded" / "10si.zarr"
@@ -139,43 +164,48 @@ def main():
     )
 
     heights = [10, 100]  # Heights in meters for wind speed data
-
+    output_daarrays = []
     with ProgressBar(dt=10):
         print("Starting wind speed alpha computation...")
         da_alpha = calculate_alpha(ds_ws, heights).rename("alpha")
-        da_alpha = group_by_synthetic_time(da_alpha).persist()
-
+        output_daarrays.append(group_by_synthetic_time_and_aggregate(da_alpha, aggregation_method=args.aggregation_method).persist())
         print("Calculating temporal smoothing...")
-        da_alpha_temp_smoothed = temporal_smooth(da_alpha)
-        da_alpha_temp_smoothed = xr.DataArray(
-            da_alpha_temp_smoothed,
-            dims=da_alpha.dims,
-            coords=da_alpha.coords,
-            attrs=da_alpha.attrs,
-            name=da_alpha.name,
-        )
+        if args.do_temporal:
+            da_alpha_temp_smoothed = temporal_smooth(da_alpha)
+            output_daarrays.append(
+                xr.DataArray(
+                    da_alpha_temp_smoothed,
+                    dims=da_alpha.dims,
+                    coords=da_alpha.coords,
+                    attrs=da_alpha.attrs,
+                    name=da_alpha.name,
+                )
+            )
         print("Calculating spatial smoothing...")
-        da_alpha_tempspatial_smoothed = spatial_smooth(
-            da_alpha_temp_smoothed.chunk({"time": -1, "lat": -1, "lon": -1})
-        )
-        da_alpha_tempspatial_smoothed = xr.DataArray(
-            da_alpha_tempspatial_smoothed,
-            dims=da_alpha.dims,
-            coords=da_alpha.coords,
-            attrs=da_alpha.attrs,
-            name=da_alpha.name,
-        ).compute()
+        if args.do_temporal and args.do_spatial:
+            da_alpha_tempspatial_smoothed = spatial_smooth(
+                da_alpha_temp_smoothed.chunk({"time": -1, "lat": -1, "lon": -1})
+            )
+            output_daarrays.append(
+                xr.DataArray(
+                    da_alpha_tempspatial_smoothed,
+                    dims=da_alpha.dims,
+                    coords=da_alpha.coords,
+                    attrs=da_alpha.attrs,
+                    name=da_alpha.name,
+                ).compute()
+            )
 
         print("Saving results...")
         output_files = [
-            f"da_alpha_cerra_heights_{heights[0]}_{heights[1]}.nc",
-            f"da_alpha_temp_smoothed_cerra_heights_{heights[0]}_{heights[1]}.nc",
-            f"da_alpha_tempspatial_smoothed_cerra_heights_{heights[0]}_{heights[1]}.nc",
+            f"da_alpha_cerra_{args.aggregation_method}_heights_{heights[0]}_{heights[1]}.nc",
+            f"da_alpha_temp_smoothed_cerra_{args.aggregation_method}_heights_{heights[0]}_{heights[1]}.nc",
+            f"da_alpha_tempspatial_smoothed_cerra_{args.aggregation_method}_heights_{heights[0]}_{heights[1]}.nc",
         ]
         save_dataarrays(
             output_path,
-            [da_alpha, da_alpha_temp_smoothed, da_alpha_tempspatial_smoothed],
-            output_files,
+            output_daarrays,
+            output_files[:len(output_daarrays)],
         )
         elapsed_minutes = (time.time() - start_time) / 60
         print(

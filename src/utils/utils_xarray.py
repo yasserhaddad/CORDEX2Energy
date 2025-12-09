@@ -630,3 +630,19 @@ def tile_dataset_to_target_time(
     ds_tiled = xr.concat([ds_var] * n_repeats, dim="time").isel(time=slice(0, n_target))
     ds_tiled = ds_tiled.assign_coords(time=target_time)
     return ds_tiled
+
+
+def get_nan_mask(ds: xr.Dataset, var_name: str, climate_model_chain: str) -> xr.DataArray:
+    """Get a mask of NaN values for the specified variable in the dataset.
+
+    By default returns a boolean DataArray with True where values are NaN and False elsewhere.
+    If apply_mask=True it returns the variable DataArray with NaNs masked out (kept as NaN,
+    but named and annotated as a masked version).
+    """
+    # boolean mask: True where NaN
+    nan_mask = ds[var_name].isnull()
+    nan_mask.name = "nan_mask"
+    nan_mask.attrs["long_name"] = f"NaN mask for {climate_model_chain}"
+    nan_mask.attrs["description"] = "True where values are NaN, False elsewhere"
+
+    return nan_mask

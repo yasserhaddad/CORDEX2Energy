@@ -26,7 +26,7 @@ from src.conversion_energy.wind import (
 from src.data_processing.load_data import ClimateModelData
 from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
 from src.conversion_energy.aggregate_data import aggregate_data_per_country
-from src.utils.utils_xarray import sel_extent
+from src.utils.utils_xarray import get_nan_mask, sel_extent
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")
@@ -85,6 +85,18 @@ if __name__ == "__main__":
         else {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
     )
 
+    path_tas = (
+        path_data_processed
+        / "cordex_processed"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / "regridded"
+        / "3hr"
+        / "tas.zarr"
+    )
+    da_nan_mask = get_nan_mask(
+        xr.open_zarr(path_tas, chunks="auto").isel(time=0), var_name="tas", climate_model_chain=args.climate_model_chain
+    ).compute().chunk({"lat": BC_SUBDAILY_CHUNKS["lat"], "lon": BC_SUBDAILY_CHUNKS["lon"]})
+
     path_wind_100m = (
         path_data_processed
         / "cordex_processed"
@@ -100,12 +112,14 @@ if __name__ == "__main__":
             extent=extent,
             chunks=BC_SUBDAILY_CHUNKS,
         )
+        ds_wind.ds_data = ds_wind.ds_data.where(~da_nan_mask)
 
         ds_wind_150m = ClimateModelData(
             path_wind_100m.parent / "wind150m.zarr",
             extent=extent,
             chunks=BC_SUBDAILY_CHUNKS,
         )
+        ds_wind_150m.ds_data = ds_wind_150m.ds_data.where(~da_nan_mask)
 
         print("Computing wind speed exponent...")
         da_alpha = compute_power_law_exponent(
@@ -121,12 +135,14 @@ if __name__ == "__main__":
             / "cerra_processed"
             / "alpha"
             / f"da_alpha_temp_smoothed_cerra_heights_{heights[0]}_{heights[1]}.nc"
-        ).alpha, extent=extent)
+        ).alpha.where(~da_nan_mask), extent=extent)
+
         ds_wind = ClimateModelData(
             path_wind_100m.parent / "sfcWind.zarr",
             extent=extent,
             chunks=BC_SUBDAILY_CHUNKS,
         )
+        ds_wind.ds_data = ds_wind.ds_data.where(~da_nan_mask)
 
         da_alpha = da_alpha.isel(
             time=(np.arange(len(ds_wind.ds_data.time)) % len(da_alpha.time))

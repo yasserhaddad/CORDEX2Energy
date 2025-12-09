@@ -163,3 +163,5 @@ cython_debug/
 
 paths*.json
 **/logs/
+data/
+figs/validation/

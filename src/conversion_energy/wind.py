@@ -1,11 +1,13 @@
 from ast import literal_eval
+from pathlib import Path
 import numpy as np
 import pandas as pd
+import windpowerlib
 import windpowerlib.power_curves as pc
 from windpowerlib.data import store_turbine_data_from_oedb
 import xarray as xr
 
-EUROPE_TURBINES = ['E-126/7580', 'SWT120/3600', 'SWT142/3150']
+EUROPE_TURBINES = ["E-126/7580", "SWT120/3600", "SWT142/3150"]
 CH_TURBINES = ["E-82/2300", "E-92/2350", "V90/2000", "V112/3300"]
 
 EUROPE_HUB_HEIGHTS = {
@@ -14,12 +16,7 @@ EUROPE_HUB_HEIGHTS = {
     "E-126/7580": 127,
 }
 
-CH_HUB_HEIGHTS = {
-    "E-82/2300": 98,
-    "E-92/2350": 98,
-    "V90/2000": 95,
-    "V112/3300": 94
-}
+CH_HUB_HEIGHTS = {"E-82/2300": 98, "E-92/2350": 98, "V90/2000": 95, "V112/3300": 94}
 
 
 def cubic_spline_interpol(power: pd.DataFrame) -> pd.DataFrame:
@@ -41,12 +38,81 @@ def cubic_spline_interpol(power: pd.DataFrame) -> pd.DataFrame:
     new_index = np.arange(start, end + 0.01, 0.01)
 
     # Reindex and interpolate
-    power = power.reindex(new_index, tolerance=1e-7, method='nearest')
-    power = power.interpolate(method='spline', order=3, s=0)
+    power = power.reindex(new_index, tolerance=1e-7, method="nearest")
+    power = power.interpolate(method="spline", order=3, s=0)
 
     # Round the index for consistency
     power.index = np.round(power.index, decimals=2)
     return power
+
+
+def get_turbine_data():
+    windpowerlib_path = Path(windpowerlib.__file__).parent
+    turbine_data_path = windpowerlib_path / "oedb"
+    if turbine_data_path.exists():
+        turbine_data = pd.read_csv(turbine_data_path / "turbine_data.csv")
+        power_curve = pd.read_csv(turbine_data_path / "power_curves.csv")
+        power_curve_values = power_curve.iloc[:, 1:].apply(
+            lambda row: [float(x) for x in row if pd.notnull(x)]
+            if any(pd.notnull(row))
+            else None,
+            axis=1,
+        )
+        # For each row, get a list of column names where the value is not None
+        power_curve["power_curve_wind_speeds"] = power_curve.iloc[:, 1:].apply(
+            lambda row: [
+                float(col) for col in power_curve.columns[1:] if pd.notnull(row[col])
+            ],
+            axis=1,
+        )
+        power_curve["power_curve_values"] = power_curve_values
+        turbine_data = pd.merge(
+            turbine_data,
+            power_curve[
+                ["turbine_type", "power_curve_wind_speeds", "power_curve_values"]
+            ],
+            on="turbine_type",
+            how="left",
+        )
+        power_coefficient_curve = pd.read_csv(
+            turbine_data_path / "power_coefficient_curves.csv"
+        )
+        power_coefficient_curve_values = power_coefficient_curve.iloc[:, 1:].apply(
+            lambda row: [float(x) for x in row if pd.notnull(x)]
+            if any(pd.notnull(row))
+            else None,
+            axis=1,
+        )
+        # For each row, get a list of column names where the value is not None
+        power_coefficient_curve["power_coefficient_curve_wind_speeds"] = (
+            power_coefficient_curve.iloc[:, 1:].apply(
+                lambda row: [
+                    float(col)
+                    for col in power_coefficient_curve.columns[1:]
+                    if pd.notnull(row[col])
+                ],
+                axis=1,
+            )
+        )
+        power_coefficient_curve["power_coefficient_curve_values"] = (
+            power_coefficient_curve_values
+        )
+        turbine_data = pd.merge(
+            turbine_data,
+            power_coefficient_curve[
+                [
+                    "turbine_type",
+                    "power_coefficient_curve_wind_speeds",
+                    "power_coefficient_curve_values",
+                ]
+            ],
+            on="turbine_type",
+            how="left",
+        )
+
+    else:
+        turbine_data = store_turbine_data_from_oedb()
+    return turbine_data
 
 
 def compute_smooth_power_curve(turbine_type: str) -> pd.DataFrame:
@@ -83,25 +149,31 @@ def compute_smooth_power_curve(turbine_type: str) -> pd.DataFrame:
     """
 
     df_turbine = store_turbine_data_from_oedb()
-    power_curve = df_turbine.loc[df_turbine['turbine_type'] == turbine_type].iloc[0]
+    power_curve = df_turbine.loc[df_turbine["turbine_type"] == turbine_type].iloc[0]
     if not power_curve.has_power_curve:
         raise ValueError(f"Power curve for turbine type {turbine_type} not available.")
-    power_curve['power_curve_wind_speeds'] = np.array(literal_eval(power_curve['power_curve_wind_speeds']))
-    power_curve['power_curve_values'] = np.array(literal_eval(power_curve['power_curve_values']))
+    power_curve["power_curve_wind_speeds"] = np.array(
+        literal_eval(power_curve["power_curve_wind_speeds"])
+    )
+    power_curve["power_curve_values"] = np.array(
+        literal_eval(power_curve["power_curve_values"])
+    )
 
     power_curve.power_curve_values /= power_curve.power_curve_values.max()
     power_curve_smoothed = pc.smooth_power_curve(
         pd.Series(power_curve.power_curve_wind_speeds),
         pd.Series(power_curve.power_curve_values),
         standard_deviation_method="turbulence_intensity",
-        turbulence_intensity=0.1246, # turbulence intensity taken from eq. 3-13 in Knorr (2016)
+        turbulence_intensity=0.1246,  # turbulence intensity taken from eq. 3-13 in Knorr (2016)
     )
 
-    power_curve_smoothed = power_curve_smoothed.set_index('wind_speed')
+    power_curve_smoothed = power_curve_smoothed.set_index("wind_speed")
     power_curve_smoothed = cubic_spline_interpol(power_curve_smoothed)
     power_curve_smoothed[power_curve_smoothed < 0] = 0
 
-    return power_curve_smoothed.rename(columns={'value': turbine_type.replace("/", "_")})
+    return power_curve_smoothed.rename(
+        columns={"value": turbine_type.replace("/", "_")}
+    )
 
 
 def compute_power_law_exponent(

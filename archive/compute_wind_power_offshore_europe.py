@@ -53,11 +53,6 @@ if __name__ == "__main__":
 
     time_start = time.time()
     print("Loading wind data...")
-    extent = (
-        {"lat_min": 30, "lat_max": 75, "lon_min": -12, "lon_max": 30}
-        if args.scope == "europe"
-        else {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}
-    )
     chunks_bc = {
         "time": 2920,
         "lat": 128,

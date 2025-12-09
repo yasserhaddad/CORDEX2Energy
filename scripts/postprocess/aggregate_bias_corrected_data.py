@@ -9,16 +9,16 @@ from pathlib import Path
 import xarray as xr
 
 sys.path.append("../..")
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS
 
-dask.config.set({'distributed.worker.multiprocessing-method': 'forkserver'})
-dask.config.set({'distributed.worker.use-file-locking': 'False'})
-dask.config.set({'logging.distributed': 'error'})
-dask.config.set(num_workers=20, scheduler="processes")
-dask.config.set({"array.chunk-size": "500MiB"})
-
-def aggregate_to_daily(ds: xr.Dataset) -> xr.Dataset:
-    return ds.resample(time='1D').mean()
+def aggregate_to_daily(ds: xr.Dataset, drop_leap_days: bool = False) -> xr.Dataset:
+    """Aggregate dataset to daily means and optionally remove Feb 29 entries."""
+    daily = ds.resample(time="1D").mean()
+    if drop_leap_days:
+        daily = daily.sel(
+            time=~((daily["time"].dt.month == 2) & (daily["time"].dt.day == 29))
+        )
+    return daily
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Aggregate climate data.")
@@ -28,11 +28,18 @@ if __name__ == "__main__":
     parser.add_argument("climate_model_chain", type=str, help="Climate model chain.")
     parser.add_argument("climate_scenario", type=str, help="Climate scenario.")
     parser.add_argument("temp_res", type=str, help="Temporal resolution.")
+    parser.add_argument("--force", action="store_true", help="Force reprocessing even if output exists.")
 
     args = parser.parse_args()
 
-    dask.config.set(num_workers=15, scheduler="processes")
-    dask.config.set({"array.chunk-size": "500MiB"})
+    dask.config.set(num_workers=15, threads_per_worker=16)
+    dask.config.set({
+        "distributed.worker.memory.target": 0.7,  # Spill to disk at 70%
+        "distributed.worker.memory.spill": 0.8,   # Start spilling at 80%
+        "distributed.worker.memory.pause": 0.9,   # Pause worker at 90%
+        "array.chunk-size": "512MiB",
+        "logging.distributed": "error",           # Less verbose logs
+    })
 
     paths = json.load(open(args.paths_file))
     path_data_processed = Path(paths["path_data_processed"])
@@ -44,31 +51,27 @@ if __name__ == "__main__":
         / "bias_corrected"
     )
 
-    bc_chunks = {
-        "time": 2920,
-        "lat": 128,
-        "lon": 128,
-    }
-
     for file in (bias_corrected_data_dir / args.temp_res).glob("*.zarr"):
+        if file.stem in ["wind100m", "wind150m"]:
+            print(f"Skipping {file.name}.")
+            continue
         print(f"Processing {file.name}")
         with ProgressBar(dt=10):
-            ds = aggregate_to_daily(
-                xr.open_zarr(file, chunks=bc_chunks)
-            ).compute()
-
             output_path = bias_corrected_data_dir / "day" / file.name
-            target_chunks = {
-                "time": 365,
-                "lat": 256,
-                "lon": 256
-            }
+            if output_path.exists() and not args.force:
+                print(f"  Output {output_path} already exists. Skipping.")
+                continue
+            ds = aggregate_to_daily(
+                xr.open_zarr(file, chunks="auto"),
+                drop_leap_days=True
+            )
+
 
             zarr_encoding = {
                 var: {
                     "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
-                    "chunks": tuple(target_chunks.values()),
+                    "chunks": tuple(BC_DAILY_CHUNKS.values()),
                 }
                 for var in ds.data_vars
             }
-            ds.to_zarr(output_path, mode="w")
+            ds.chunk(BC_DAILY_CHUNKS).to_zarr(output_path, mode="w", encoding=zarr_encoding)

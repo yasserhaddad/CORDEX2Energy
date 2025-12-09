@@ -37,7 +37,7 @@ dask.config.set({"array.chunk-size": "400MiB"})
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Compute wind power.")
+    parser = argparse.ArgumentParser(description="Compute heating and cooling degree days.")
     parser.add_argument(
         "paths_file", type=str, help="Path to the JSON file containing paths."
     )

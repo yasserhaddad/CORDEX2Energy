@@ -108,9 +108,9 @@ def compute_cdd_hdd_xr(
         )
         list_ds.append(
             (
-                ((ds_metric * da_pop_normalized)
-                 .resample(time="1D").sum("time") / 24)
-                 .rename(name)
+                (
+                    (ds_metric * da_pop_normalized).resample(time="1D").sum("time") / 24
+                ).rename(name)
             )
         )
 
@@ -119,6 +119,46 @@ def compute_cdd_hdd_xr(
     ds_metric_weighted.attrs["long_name"] = "Degree days"
     ds_metric_weighted.attrs["description"] = (
         "Heating and cooling degree days calculated from temperature data."
+    )
+
+    return ds_metric_weighted
+
+
+def compute_cooling_days(x: np.ndarray, base_temp: float = 24):
+    return x >= base_temp
+
+
+def compute_heating_days(x: np.ndarray, base_temp: float = 15):
+    return x <= base_temp
+
+
+def compute_cdm_hdm_xr(
+    da_tas: xr.DataArray,
+    da_pop_normalized: xr.DataArray,
+    temperature_weighting: bool = False,
+    parallelized: bool = True,
+) -> xr.Dataset:
+    metrics_funcs = {
+        "heating_days": compute_heating_days,
+        "cooling_days": compute_cooling_days,
+    }
+    list_ds = []
+    for name, metric_func in metrics_funcs.items():
+        ds_metric = xr.apply_ufunc(
+            metric_func,
+            da_tas,
+            keep_attrs=True,
+            dask="allowed" if parallelized else "forbidden",
+        )
+        da_metric = ds_metric if temperature_weighting else (ds_metric * da_pop_normalized)
+        da_metric = (da_metric.resample(time="ME").sum("time")).rename(name)
+        list_ds.append(da_metric)
+
+    ds_metric_weighted = xr.merge(list_ds)
+    ds_metric_weighted.attrs["units"] = "days"
+    ds_metric_weighted.attrs["long_name"] = "Heating and cooling days per month"
+    ds_metric_weighted.attrs["description"] = (
+        "Heating and cooling days per month calculated from temperature data."
     )
 
     return ds_metric_weighted

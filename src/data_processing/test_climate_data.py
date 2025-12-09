@@ -1,5 +1,6 @@
 import xarray as xr
 import numpy as np
+import pandas as pd
 
 
 def has_duplicate_coords(ds: xr.Dataset) -> dict:
@@ -55,6 +56,67 @@ def is_time_sorted(ds: xr.Dataset) -> bool:
         time_values[i] <= time_values[i + 1] for i in range(len(time_values) - 1)
     )
 
+def has_complete_timesteps(ds: xr.Dataset, drop_leap_days: bool = False) -> bool:
+    """
+    Check whether the dataset's 'time' coordinate contains all expected timesteps.
+
+    The function infers the timestep frequency from the existing times (using pandas.infer_freq
+    or the mode of differences as a fallback), constructs an expected time index from the
+    first to the last timestamp, optionally removes leap days (Feb 29) from the expected
+    index, and then compares expected vs. actual timesteps.
+
+    Parameters
+    ----------
+    ds : xr.Dataset
+        Dataset with a 'time' coordinate.
+    drop_leap_days : bool, optional
+        If True, drop February 29 from the expected timeseries before comparison.
+
+    Returns
+    -------
+    bool
+        True when no expected timesteps are missing, False otherwise.
+    """
+
+    if "time" not in ds.coords:
+        return True
+
+    times = pd.DatetimeIndex(ds["time"].values)
+    # remove timezone awareness for comparison
+    if times.tz is not None:
+        times = times.tz_convert(None)
+
+    times = times.sort_values().unique()
+    if len(times) < 2:
+        return True
+
+    freq = pd.infer_freq(times)
+    if freq is None:
+        # fallback: use the mode of the diffs
+        diffs = times.to_series().diff().dropna()
+        if diffs.empty:
+            return True
+        mode = diffs.mode()
+        if mode.empty:
+            return True
+        freq = mode.iloc[0]
+
+    # Build expected index
+    expected = pd.date_range(start=times[0], end=times[-1], freq=freq)
+
+    if drop_leap_days:
+        expected = expected[~((expected.month == 2) & (expected.day == 29))]
+
+    # Normalize both indexes to naive UTC-less datetimes for fair comparison
+    expected = pd.DatetimeIndex(expected).tz_localize(None)
+    actual = pd.DatetimeIndex(times).tz_localize(None)
+
+    missing = expected.difference(actual)
+    if len(missing) > 0:
+        print(f"Warning: {len(missing)} expected timestep(s) are missing. Examples: {missing[:5].tolist()}")
+        return False
+
+    return True
 
 def has_identical_random_timesteps(ds: xr.Dataset) -> bool:
     """
@@ -80,11 +142,17 @@ def has_identical_random_timesteps(ds: xr.Dataset) -> bool:
     time_len = ds.sizes["time"]
     idx = np.random.choice(time_len, size=2, replace=False)
     for var in ds.data_vars:
-        arr0 = ds[var].isel(time=idx[0]).values
-        arr1 = ds[var].isel(time=idx[1]).values
-        if not np.array_equal(arr0, arr1):
+        arr0 = ds[var].isel(time=idx[0]).load().values
+        arr1 = ds[var].isel(time=idx[1]).load().values
+        is_equal = np.array_equal(arr0, arr1, equal_nan=True)
+
+        # Explicit cleanup
+        del arr0, arr1
+
+        if not is_equal:
             return False
     return True
+
 
 def parse_cdo_grid_file(grid_file_path: str) -> dict:
     """
