@@ -17,20 +17,22 @@ Validation metrics include:
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import dask
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import seaborn as sns
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
-from src.utils.constants import EXTENT_PREVAH, REFERENCE_PERIOD, FUTURE_PERIOD
-from src.utils.utils_xarray import sel_extent
+from cordex2energy.utils.constants import (
+    EXTENT_PREVAH,
+    EXTENT_CH,
+    EXTENT_BC,
+    REFERENCE_PERIOD,
+    FUTURE_PERIOD,
+)
+from cordex2energy.utils.utils_xarray import sel_extent
 
 # Configure Dask
 dask.config.set(num_workers=16, threads_per_worker=2)
@@ -47,7 +49,7 @@ VARIABLE_CONFIG = {
         "units": "K",
         "convert": lambda x: x - 273.15,  # K to °C
         "units_display": "°C",
-        "thresholds": {"cold": -10, "hot": 35},
+        "thresholds": {"cold": -20, "hot": 40},
         "expected_range": (-40, 50),
         "temp_res": "3hr",
     },
@@ -56,7 +58,7 @@ VARIABLE_CONFIG = {
         "units": "%",
         "convert": None,
         "units_display": "%",
-        "thresholds": {"low": 30, "high": 95},
+        "thresholds": {"low": 10, "high": 100},
         "expected_range": (0, 100),
         "temp_res": "3hr",
     },
@@ -95,10 +97,11 @@ VARIABLE_CONFIG = {
             "kg m-2 s-1": lambda x: x * 86400,  # kg/m²/s to mm/day (rate to total)
             "kg m-2": lambda x: x,  # kg/m² to mm/day (equivalent, no conversion needed)
         },
-        "convert": lambda x: x * 86400,  # Default conversion (for backward compatibility)
+        "convert": lambda x: x
+        * 86400,  # Default conversion (for backward compatibility)
         "units_display": "mm d-1",
-        "thresholds": {"heavy": 20, "extreme": 150},  # mm/day after conversion
-        "expected_range": (0, 500),  # mm/day
+        "thresholds": {"low": 0, "high": 150},  # mm/day after conversion
+        "expected_range": (0, 300),  # mm/day
         "temp_res": "day",
     },
     "mrro": {
@@ -106,7 +109,7 @@ VARIABLE_CONFIG = {
         "units": "kg m-2 s-1",
         "convert": lambda x: x * 86400,  # kg/m²/s to mm/day
         "units_display": "kg m-2",
-        "thresholds": {"high": 10},
+        "thresholds": {"high": 10, "low": 0.5},
         "expected_range": (0, 200),
         "temp_res": "day",
     },
@@ -277,6 +280,16 @@ class BiasCorrectingValidator:
         ds_raw = xr.open_zarr(raw_path, chunks="auto")
         da_raw = ds_raw[variable]
 
+        # Remove any extra dimensions beyond lat, lon, time
+        expected_dims = {"lat", "lon", "time"}
+        for da in [da_raw, da_bc]:
+            extra_dims = set(da.dims) - expected_dims
+            if extra_dims:
+                print(f"  Removing extra dimensions from data: {extra_dims}")
+                for dim in extra_dims:
+                    da_raw = da_raw.isel({dim: 0}) if dim in da_raw.dims else da_raw
+                    da_bc = da_bc.isel({dim: 0}) if dim in da_bc.dims else da_bc
+
         # Load CERRA reference data (only for reference period)
         da_cerra = None
         if period == "reference":
@@ -297,6 +310,15 @@ class BiasCorrectingValidator:
                 if cerra_path.exists():
                     ds_cerra = xr.open_zarr(cerra_path, chunks="auto")
                     da_cerra = ds_cerra[cerra_var]
+
+                    # Remove any extra dimensions from CERRA data
+                    extra_dims = set(da_cerra.dims) - expected_dims
+                    if extra_dims:
+                        print(
+                            f"  Removing extra dimensions from CERRA data: {extra_dims}"
+                        )
+                        for dim in extra_dims:
+                            da_cerra = da_cerra.isel({dim: 0})
                 else:
                     print(f"  Warning: CERRA data not found: {cerra_path}")
 
@@ -323,7 +345,9 @@ class BiasCorrectingValidator:
 
         if conversions is not None or config["convert"] is not None:
             # Check each dataset and convert only if necessary
-            convert_func_bc = needs_conversion(da_bc, config["units"], config["units_display"], conversions)
+            convert_func_bc = needs_conversion(
+                da_bc, config["units"], config["units_display"], conversions
+            )
             if convert_func_bc is not None:
                 if callable(convert_func_bc):
                     da_bc_display = convert_func_bc(da_bc)
@@ -335,7 +359,9 @@ class BiasCorrectingValidator:
             else:
                 da_bc_display = da_bc
 
-            convert_func_raw = needs_conversion(da_raw, config["units"], config["units_display"], conversions)
+            convert_func_raw = needs_conversion(
+                da_raw, config["units"], config["units_display"], conversions
+            )
             if convert_func_raw is not None:
                 if callable(convert_func_raw):
                     da_raw_display = convert_func_raw(da_raw)
@@ -347,7 +373,9 @@ class BiasCorrectingValidator:
                 da_raw_display = da_raw
 
             if da_cerra is not None:
-                convert_func_cerra = needs_conversion(da_cerra, config["units"], config["units_display"], conversions)
+                convert_func_cerra = needs_conversion(
+                    da_cerra, config["units"], config["units_display"], conversions
+                )
                 if convert_func_cerra is not None:
                     if callable(convert_func_cerra):
                         da_cerra_display = convert_func_cerra(da_cerra)
@@ -417,8 +445,14 @@ class BiasCorrectingValidator:
         # 3. Temporal statistics
         print("  Computing temporal statistics...")
         self._plot_temporal_statistics(
-            da_raw_ref, da_bc_ref, da_cerra_ref, da_raw_fut, da_bc_fut,
-            variable, config, fig_dir
+            da_raw_ref,
+            da_bc_ref,
+            da_cerra_ref,
+            da_raw_fut,
+            da_bc_fut,
+            variable,
+            config,
+            fig_dir,
         )
 
         # 3. Probability distributions
@@ -496,7 +530,7 @@ class BiasCorrectingValidator:
         fig_dir,
     ):
         """Plot spatial patterns of null/NaN values for both periods."""
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             # Count NaN values across time dimension (for spatial maps)
             null_raw_ref = da_raw_ref.isnull().sum(dim="time").compute()
             null_bc_ref = da_bc_ref.isnull().sum(dim="time").compute()
@@ -653,7 +687,7 @@ class BiasCorrectingValidator:
         fig_dir,
     ):
         """Plot spatial mean patterns for reference and future periods."""
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             mean_raw_ref = da_raw_ref.mean(dim="time").compute()
             mean_bc_ref = da_bc_ref.mean(dim="time").compute()
             mean_raw_fut = da_raw_fut.mean(dim="time").compute()
@@ -762,25 +796,25 @@ class BiasCorrectingValidator:
                     da_raw_ref.sel(time=da_raw_ref.time.dt.month == month)
                     .mean(dim=["lat", "lon"])
                     .compute()
-                    .values
+                    .values.ravel()
                 )
                 monthly_values_bc_ref[month] = (
                     da_bc_ref.sel(time=da_bc_ref.time.dt.month == month)
                     .mean(dim=["lat", "lon"])
                     .compute()
-                    .values
+                    .values.ravel()
                 )
                 monthly_values_raw_fut[month] = (
                     da_raw_fut.sel(time=da_raw_fut.time.dt.month == month)
                     .mean(dim=["lat", "lon"])
                     .compute()
-                    .values
+                    .values.ravel()
                 )
                 monthly_values_bc_fut[month] = (
                     da_bc_fut.sel(time=da_bc_fut.time.dt.month == month)
                     .mean(dim=["lat", "lon"])
                     .compute()
-                    .values
+                    .values.ravel()
                 )
 
             if da_cerra_ref is not None:
@@ -796,7 +830,7 @@ class BiasCorrectingValidator:
                         da_cerra_ref.sel(time=da_cerra_ref.time.dt.month == month)
                         .mean(dim=["lat", "lon"])
                         .compute()
-                        .values
+                        .values.ravel()
                     )
 
         # Create figure with 2 subplots: yearly and monthly
@@ -804,16 +838,16 @@ class BiasCorrectingValidator:
 
         # Prepare data for yearly boxplots
         yearly_data = [
-            yearly_raw_ref.values,
-            yearly_bc_ref.values,
-            yearly_raw_fut.values,
-            yearly_bc_fut.values,
+            yearly_raw_ref.values.ravel(),
+            yearly_bc_ref.values.ravel(),
+            yearly_raw_fut.values.ravel(),
+            yearly_bc_fut.values.ravel(),
         ]
         yearly_labels = ["Raw\nRef", "BC\nRef", "Raw\nFut", "BC\nFut"]
         yearly_colors = ["#1f77b4", "#ff7f0e", "#1f77b4", "#ff7f0e"]
 
         if da_cerra_ref is not None:
-            yearly_data.insert(2, yearly_cerra_ref.values)
+            yearly_data.insert(2, yearly_cerra_ref.values.ravel())
             yearly_labels.insert(2, "CERRA\nRef")
             yearly_colors.insert(2, "#2ca02c")
 
@@ -824,27 +858,47 @@ class BiasCorrectingValidator:
             patch_artist=True,
             widths=0.6,
             showfliers=True,
-            flierprops=dict(marker='o', markerfacecolor='gray', markersize=4, alpha=0.5),
+            flierprops=dict(
+                marker="o", markerfacecolor="gray", markersize=4, alpha=0.5
+            ),
         )
 
         # Color the boxes
-        for patch, color in zip(bp1['boxes'], yearly_colors):
+        for patch, color in zip(bp1["boxes"], yearly_colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.6)
 
         axes[0].set_ylabel(f"{config['name']} ({config['units_display']})")
-        axes[0].set_title(f"Yearly Means\n({len(yearly_raw_ref)} years ref, {len(yearly_raw_fut)} years fut)")
-        axes[0].grid(True, alpha=0.3, axis='y')
+        axes[0].set_title(
+            f"Yearly Means\n({len(yearly_raw_ref)} years ref, {len(yearly_raw_fut)} years fut)"
+        )
+        axes[0].grid(True, alpha=0.3, axis="y")
 
         # Add period separator
         if da_cerra_ref is not None:
-            axes[0].axvline(x=3.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
+            axes[0].axvline(
+                x=3.5, color="black", linestyle="--", linewidth=1, alpha=0.5
+            )
         else:
-            axes[0].axvline(x=2.5, color='black', linestyle='--', linewidth=1, alpha=0.5)
+            axes[0].axvline(
+                x=2.5, color="black", linestyle="--", linewidth=1, alpha=0.5
+            )
 
         # Plot monthly boxplots - one group per month
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        month_names = [
+            "Jan",
+            "Feb",
+            "Mar",
+            "Apr",
+            "May",
+            "Jun",
+            "Jul",
+            "Aug",
+            "Sep",
+            "Oct",
+            "Nov",
+            "Dec",
+        ]
 
         # Prepare positions for each dataset within each month
         n_datasets = 5 if da_cerra_ref is not None else 4
@@ -861,38 +915,38 @@ class BiasCorrectingValidator:
             # Raw Ref
             positions_all.append(base_pos)
             data_all.append(monthly_values_raw_ref[month])
-            colors_all.append('#1f77b4')
+            colors_all.append("#1f77b4")
 
             # BC Ref
             positions_all.append(base_pos + dataset_width)
             data_all.append(monthly_values_bc_ref[month])
-            colors_all.append('#ff7f0e')
+            colors_all.append("#ff7f0e")
 
             if da_cerra_ref is not None:
                 # CERRA Ref
                 positions_all.append(base_pos + 2 * dataset_width)
                 data_all.append(monthly_values_cerra_ref[month])
-                colors_all.append('#2ca02c')
+                colors_all.append("#2ca02c")
 
                 # Raw Fut
                 positions_all.append(base_pos + 3 * dataset_width)
                 data_all.append(monthly_values_raw_fut[month])
-                colors_all.append('#1f77b4')
+                colors_all.append("#1f77b4")
 
                 # BC Fut
                 positions_all.append(base_pos + 4 * dataset_width)
                 data_all.append(monthly_values_bc_fut[month])
-                colors_all.append('#ff7f0e')
+                colors_all.append("#ff7f0e")
             else:
                 # Raw Fut
                 positions_all.append(base_pos + 2 * dataset_width)
                 data_all.append(monthly_values_raw_fut[month])
-                colors_all.append('#1f77b4')
+                colors_all.append("#1f77b4")
 
                 # BC Fut
                 positions_all.append(base_pos + 3 * dataset_width)
                 data_all.append(monthly_values_bc_fut[month])
-                colors_all.append('#ff7f0e')
+                colors_all.append("#ff7f0e")
 
         # Plot all monthly boxplots
         bp2 = axes[1].boxplot(
@@ -905,33 +959,39 @@ class BiasCorrectingValidator:
         )
 
         # Color the boxes
-        for patch, color in zip(bp2['boxes'], colors_all):
+        for patch, color in zip(bp2["boxes"], colors_all):
             patch.set_facecolor(color)
             patch.set_alpha(0.6)
 
         # Set x-axis ticks at the center of each month group
-        month_centers = [i * group_width + (n_datasets - 1) * dataset_width / 2
-                        for i in range(12)]
+        month_centers = [
+            i * group_width + (n_datasets - 1) * dataset_width / 2 for i in range(12)
+        ]
         axes[1].set_xticks(month_centers)
         axes[1].set_xticklabels(month_names)
 
         axes[1].set_ylabel(f"{config['name']} ({config['units_display']})")
         axes[1].set_title("Monthly Means (per month across all years)")
-        axes[1].grid(True, alpha=0.3, axis='y')
+        axes[1].grid(True, alpha=0.3, axis="y")
 
         # Add legend
         from matplotlib.patches import Patch
+
         legend_elements = [
-            Patch(facecolor='#1f77b4', alpha=0.6, label='Raw Ref'),
-            Patch(facecolor='#ff7f0e', alpha=0.6, label='BC Ref'),
+            Patch(facecolor="#1f77b4", alpha=0.6, label="Raw Ref"),
+            Patch(facecolor="#ff7f0e", alpha=0.6, label="BC Ref"),
         ]
         if da_cerra_ref is not None:
-            legend_elements.append(Patch(facecolor='#2ca02c', alpha=0.6, label='CERRA Ref'))
-        legend_elements.extend([
-            Patch(facecolor='#1f77b4', alpha=0.6, label='Raw Fut'),
-            Patch(facecolor='#ff7f0e', alpha=0.6, label='BC Fut'),
-        ])
-        axes[1].legend(handles=legend_elements, loc='best', ncol=5)
+            legend_elements.append(
+                Patch(facecolor="#2ca02c", alpha=0.6, label="CERRA Ref")
+            )
+        legend_elements.extend(
+            [
+                Patch(facecolor="#1f77b4", alpha=0.6, label="Raw Fut"),
+                Patch(facecolor="#ff7f0e", alpha=0.6, label="BC Fut"),
+            ]
+        )
+        axes[1].legend(handles=legend_elements, loc="best", ncol=5)
 
         plt.suptitle(
             f"{config['name']} - Temporal Statistics\n"
@@ -940,7 +1000,9 @@ class BiasCorrectingValidator:
         )
         plt.tight_layout()
         plt.savefig(
-            fig_dir / f"{variable}_temporal_statistics.png", dpi=300, bbox_inches="tight"
+            fig_dir / f"{variable}_temporal_statistics.png",
+            dpi=300,
+            bbox_inches="tight",
         )
         plt.close()
 
@@ -959,7 +1021,7 @@ class BiasCorrectingValidator:
         # Compute quantiles to determine bin range
         # Rechunk to single chunk for quantile computation
         print("    Computing distribution ranges...")
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             da_raw_ref_rechunk = da_raw_ref.chunk({"time": -1, "lat": -1, "lon": -1})
             da_bc_ref_rechunk = da_bc_ref.chunk({"time": -1, "lat": -1, "lon": -1})
             da_raw_fut_rechunk = da_raw_fut.chunk({"time": -1, "lat": -1, "lon": -1})
@@ -989,7 +1051,7 @@ class BiasCorrectingValidator:
 
         # Compute histograms using xarray.histogram (works with dask)
         print("    Computing histograms...")
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             hist_raw_ref = xr.apply_ufunc(
                 lambda x: np.histogram(x[~np.isnan(x)], bins=bins, density=True)[0],
                 da_raw_ref,
@@ -1097,7 +1159,7 @@ class BiasCorrectingValidator:
     ):
         """Plot extreme values (95th and 99th percentiles) for both periods."""
         # Rechunk along time dimension for quantile computation
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             da_raw_ref_rechunk = da_raw_ref.chunk({"time": -1})
             da_bc_ref_rechunk = da_bc_ref.chunk({"time": -1})
             da_raw_fut_rechunk = da_raw_fut.chunk({"time": -1})
@@ -1180,7 +1242,7 @@ class BiasCorrectingValidator:
         fig_dir,
     ):
         """Plot seasonal cycle for both periods."""
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             monthly_raw_ref = (
                 da_raw_ref.groupby("time.month")
                 .mean(dim="time")
@@ -1298,7 +1360,7 @@ class BiasCorrectingValidator:
         fig_dir,
     ):
         """Plot diurnal cycle (for sub-daily data) for both periods."""
-        with ProgressBar(dt=5):
+        with ProgressBar(dt=2):
             hourly_raw_ref = (
                 da_raw_ref.groupby("time.hour")
                 .mean(dim="time")
@@ -1436,7 +1498,7 @@ class BiasCorrectingValidator:
             # Thresholds already in display units
             thr_compare = thr_value
 
-            with ProgressBar(dt=5):
+            with ProgressBar(dt=2):
                 # Compute exceedances/counts based on threshold type
                 if is_high_threshold:
                     # Exceedances above threshold
@@ -1573,6 +1635,420 @@ class BiasCorrectingValidator:
         )
         plt.close()
 
+    def _plot_summary_statistics(self, variables: list = None):
+        """Create a comprehensive summary plot for all variables."""
+        if variables is None:
+            variables = list(VARIABLE_CONFIG.keys())
+
+        print(f"\n{'='*80}")
+        print("CREATING SUMMARY STATISTICS PLOT")
+        print(f"Variables: {', '.join(variables)}")
+        print(f"{'='*80}")
+
+        # Collect statistics for all variables
+        stats_data = {}
+
+        for variable in variables:
+            if variable not in VARIABLE_CONFIG:
+                print(f"Warning: Unknown variable {variable}, skipping")
+                continue
+
+            try:
+                print(f"\n  Processing {variable}...")
+                config = VARIABLE_CONFIG[variable]
+                temp_res = (
+                    self.temp_res_override
+                    if self.temp_res_override
+                    else config["temp_res"]
+                )
+
+                # Load data for both periods
+                da_raw_ref, da_bc_ref, da_cerra_ref = self.load_data(
+                    variable, period="reference"
+                )
+                da_raw_fut, da_bc_fut, _ = self.load_data(variable, period="future")
+
+                with ProgressBar(dt=2):
+                    # Compute statistics
+                    # 1. Timesteps with null values
+                    null_timesteps_raw_ref = (
+                        da_raw_ref.isnull()
+                        .any(dim=["lat", "lon"])
+                        .sum()
+                        .compute()
+                        .values
+                    )
+                    null_timesteps_bc_ref = (
+                        da_bc_ref.isnull()
+                        .any(dim=["lat", "lon"])
+                        .sum()
+                        .compute()
+                        .values
+                    )
+                    null_timesteps_raw_fut = (
+                        da_raw_fut.isnull()
+                        .any(dim=["lat", "lon"])
+                        .sum()
+                        .compute()
+                        .values
+                    )
+                    null_timesteps_bc_fut = (
+                        da_bc_fut.isnull()
+                        .any(dim=["lat", "lon"])
+                        .sum()
+                        .compute()
+                        .values
+                    )
+
+                    # 2. Min and Max values
+                    min_raw_ref = da_raw_ref.min().compute().values
+                    max_raw_ref = da_raw_ref.max().compute().values
+                    min_bc_ref = da_bc_ref.min().compute().values
+                    max_bc_ref = da_bc_ref.max().compute().values
+                    min_raw_fut = da_raw_fut.min().compute().values
+                    max_raw_fut = da_raw_fut.max().compute().values
+                    min_bc_fut = da_bc_fut.min().compute().values
+                    max_bc_fut = da_bc_fut.max().compute().values
+
+                    # 3. Threshold exceedances (total count across all grid points and timesteps)
+                    threshold_counts = {}
+                    if config.get("thresholds"):
+                        for thr_name, thr_value in config["thresholds"].items():
+                            is_high_threshold = thr_name in [
+                                "hot",
+                                "high",
+                                "moderate",
+                                "strong",
+                                "heavy",
+                                "extreme",
+                            ]
+
+                            if is_high_threshold:
+                                threshold_counts[thr_name] = {
+                                    "raw_ref": (da_raw_ref > thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "bc_ref": (da_bc_ref > thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "raw_fut": (da_raw_fut > thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "bc_fut": (da_bc_fut > thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                }
+                            else:
+                                threshold_counts[thr_name] = {
+                                    "raw_ref": (da_raw_ref < thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "bc_ref": (da_bc_ref < thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "raw_fut": (da_raw_fut < thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                    "bc_fut": (da_bc_fut < thr_value)
+                                    .sum()
+                                    .compute()
+                                    .values,
+                                }
+
+                stats_data[variable] = {
+                    "config": config,
+                    "null_timesteps": {
+                        "raw_ref": null_timesteps_raw_ref,
+                        "bc_ref": null_timesteps_bc_ref,
+                        "raw_fut": null_timesteps_raw_fut,
+                        "bc_fut": null_timesteps_bc_fut,
+                    },
+                    "min_values": {
+                        "raw_ref": min_raw_ref,
+                        "bc_ref": min_bc_ref,
+                        "raw_fut": min_raw_fut,
+                        "bc_fut": min_bc_fut,
+                    },
+                    "max_values": {
+                        "raw_ref": max_raw_ref,
+                        "bc_ref": max_bc_ref,
+                        "raw_fut": max_raw_fut,
+                        "bc_fut": max_bc_fut,
+                    },
+                    "thresholds": threshold_counts,
+                }
+
+            except Exception as e:
+                print(f"    ✗ Error processing {variable}: {str(e)}")
+                continue
+
+        # Create the summary plot
+        n_vars = len(stats_data)
+        if n_vars == 0:
+            print("  No data to plot!")
+            return
+
+        # Determine number of columns (5: null timesteps, min, max, threshold 1, threshold 2)
+        n_cols = 5
+        fig, axes = plt.subplots(n_vars, n_cols, figsize=(28, 4 * n_vars))
+
+        # Ensure axes is 2D
+        if n_vars == 1:
+            axes = axes.reshape(1, -1)
+
+        var_names = list(stats_data.keys())
+
+        for idx, variable in enumerate(var_names):
+            data = stats_data[variable]
+            config = data["config"]
+
+            # Column 0: Null timesteps
+            ax = axes[idx, 0]
+            x_pos = np.arange(4)
+            values = [
+                data["null_timesteps"]["raw_ref"],
+                data["null_timesteps"]["bc_ref"],
+                data["null_timesteps"]["raw_fut"],
+                data["null_timesteps"]["bc_fut"],
+            ]
+            colors = ["#1f77b4", "#ff7f0e", "#1f77b4", "#ff7f0e"]
+            bars = ax.bar(x_pos, values, color=colors, alpha=0.7)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(
+                ["Raw\nRef", "BC\nRef", "Raw\nFut", "BC\nFut"], fontsize=9
+            )
+            ax.set_ylabel("Timesteps with Nulls", fontsize=10)
+            ax.set_title(
+                f"{variable.upper()}\nNull Timesteps", fontsize=11, fontweight="bold"
+            )
+            ax.grid(True, alpha=0.3, axis="y")
+            # Add values on bars
+            for bar, val in zip(bars, values):
+                height = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height,
+                    f"{int(val)}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+            # Column 1: Min values
+            ax = axes[idx, 1]
+            values = [
+                data["min_values"]["raw_ref"],
+                data["min_values"]["bc_ref"],
+                data["min_values"]["raw_fut"],
+                data["min_values"]["bc_fut"],
+            ]
+            bars = ax.bar(x_pos, values, color=colors, alpha=0.7)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(
+                ["Raw\nRef", "BC\nRef", "Raw\nFut", "BC\nFut"], fontsize=9
+            )
+            ax.set_ylabel(f'Min ({config["units_display"]})', fontsize=10)
+            ax.set_title(
+                f"{variable.upper()}\nMinimum Value", fontsize=11, fontweight="bold"
+            )
+            ax.grid(True, alpha=0.3, axis="y")
+            # Add values on bars
+            for bar, val in zip(bars, values):
+                height = bar.get_height()
+                y_pos = (
+                    height
+                    if height > 0
+                    else height - (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.05
+                )
+                va = "bottom" if height > 0 else "top"
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    y_pos,
+                    f"{val:.1f}",
+                    ha="center",
+                    va=va,
+                    fontsize=8,
+                )
+
+            # Column 2: Max values
+            ax = axes[idx, 2]
+            values = [
+                data["max_values"]["raw_ref"],
+                data["max_values"]["bc_ref"],
+                data["max_values"]["raw_fut"],
+                data["max_values"]["bc_fut"],
+            ]
+            bars = ax.bar(x_pos, values, color=colors, alpha=0.7)
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(
+                ["Raw\nRef", "BC\nRef", "Raw\nFut", "BC\nFut"], fontsize=9
+            )
+            ax.set_ylabel(f'Max ({config["units_display"]})', fontsize=10)
+            ax.set_title(
+                f"{variable.upper()}\nMaximum Value", fontsize=11, fontweight="bold"
+            )
+            ax.grid(True, alpha=0.3, axis="y")
+            # Add values on bars
+            for bar, val in zip(bars, values):
+                height = bar.get_height()
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2.0,
+                    height,
+                    f"{val:.1f}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                )
+
+            # Columns 3-4: Threshold exceedances (split across two subplots)
+            if data["thresholds"]:
+                threshold_items = list(data["thresholds"].items())
+                n_thresholds = len(threshold_items)
+
+                # Split thresholds across two columns
+                thresholds_per_col = (n_thresholds + 1) // 2  # Ceiling division
+
+                for col_offset in range(2):
+                    ax = axes[idx, 3 + col_offset]
+                    start_idx = col_offset * thresholds_per_col
+                    end_idx = min(start_idx + thresholds_per_col, n_thresholds)
+
+                    if start_idx < n_thresholds:
+                        col_thresholds = threshold_items[start_idx:end_idx]
+                        n_col_thresholds = len(col_thresholds)
+
+                        if n_col_thresholds > 0:
+                            bar_width = 0.18
+                            group_spacing = 0.1
+
+                            # Collect threshold names for title
+                            threshold_names_for_title = []
+                            for thr_name, _ in col_thresholds:
+                                thr_value = config["thresholds"][thr_name]
+                                is_high = thr_name in [
+                                    "hot",
+                                    "high",
+                                    "moderate",
+                                    "strong",
+                                    "heavy",
+                                    "extreme",
+                                ]
+                                comp = ">" if is_high else "<"
+                                threshold_names_for_title.append(
+                                    f"{thr_name} {comp}{thr_value}"
+                                )
+
+                            # Plot each threshold as a group of 4 bars
+                            all_positions = []
+                            all_values = []
+                            for thr_idx, (thr_name, thr_data) in enumerate(
+                                col_thresholds
+                            ):
+                                base_pos = thr_idx * (4 * bar_width + group_spacing)
+                                positions = [base_pos + i * bar_width for i in range(4)]
+
+                                values = [
+                                    thr_data["raw_ref"],
+                                    thr_data["bc_ref"],
+                                    thr_data["raw_fut"],
+                                    thr_data["bc_fut"],
+                                ]
+
+                                all_positions.extend(positions)
+                                all_values.extend(values)
+
+                            # Plot all bars
+                            bars = ax.bar(
+                                all_positions,
+                                all_values,
+                                width=bar_width,
+                                color=colors * n_col_thresholds,
+                                alpha=0.7,
+                            )
+
+                            # Add values on bars
+                            for bar, val in zip(bars, all_values):
+                                height = bar.get_height()
+                                ax.text(
+                                    bar.get_x() + bar.get_width() / 2.0,
+                                    height,
+                                    f"{int(val)}",
+                                    ha="center",
+                                    va="bottom",
+                                    fontsize=7,
+                                )
+
+                            # Set x-axis labels - one set of data labels per threshold group
+                            all_tick_positions = []
+                            all_tick_labels = []
+                            data_labels = ["Raw\nRef", "BC\nRef", "Raw\nFut", "BC\nFut"]
+
+                            for thr_idx in range(n_col_thresholds):
+                                base_pos = thr_idx * (4 * bar_width + group_spacing)
+                                tick_positions = [
+                                    base_pos + i * bar_width for i in range(4)
+                                ]
+                                all_tick_positions.extend(tick_positions)
+                                all_tick_labels.extend(data_labels)
+
+                            ax.set_xticks(all_tick_positions)
+                            ax.set_xticklabels(all_tick_labels, fontsize=8)
+                            ax.set_ylabel("Count", fontsize=10)
+
+                            # Create title with threshold names
+                            title_thresholds = ", ".join(threshold_names_for_title)
+                            ax.set_title(
+                                f"{variable.upper()}\n{title_thresholds} {config['units_display']}",
+                                fontsize=11,
+                                fontweight="bold",
+                            )
+                            ax.grid(True, alpha=0.3, axis="y")
+                        else:
+                            ax.axis("off")
+                    else:
+                        ax.axis("off")
+            else:
+                # No thresholds - turn off both threshold columns
+                for col_offset in range(2):
+                    ax = axes[idx, 3 + col_offset]
+                    if col_offset == 0:
+                        ax.text(
+                            0.5,
+                            0.5,
+                            "No thresholds\ndefined",
+                            ha="center",
+                            va="center",
+                            transform=ax.transAxes,
+                            fontsize=10,
+                        )
+                    ax.set_xticks([])
+                    ax.set_yticks([])
+                    if col_offset == 1:
+                        ax.axis("off")
+
+        plt.suptitle(
+            f"Summary Statistics - All Variables\n"
+            f"{self.climate_model_chain} - {self.climate_scenario}",
+            fontsize=14,
+            fontweight="bold",
+            y=1.02,
+        )
+        plt.tight_layout()
+
+        # Save to output directory root
+        output_file = self.output_dir / "summary_statistics.png"
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        print(f"\n  ✓ Summary plot saved to {output_file}")
+
     def validate_all_variables(self, variables: list = None):
         """Validate all specified variables."""
         if variables is None:
@@ -1633,6 +2109,18 @@ if __name__ == "__main__":
         default=None,
         help="Override temporal resolution (default: use value from variable config)",
     )
+    parser.add_argument(
+        "--extent",
+        type=str,
+        choices=["prevah", "switzerland", "europe"],
+        default="prevah",
+        help="Domain for validation extent (default: prevah)",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Create summary statistics plot for all variables",
+    )
 
     args = parser.parse_args()
 
@@ -1640,7 +2128,18 @@ if __name__ == "__main__":
     paths = json.load(open(args.paths_file))
     path_data_processed = Path(paths["path_data_processed"])
 
-    if (path_data_processed / "cordex_processed" / f"{args.climate_model_chain}_{args.climate_scenario}").is_dir():
+    if args.extent == "prevah":
+        extent = EXTENT_PREVAH
+    elif args.extent == "switzerland":
+        extent = EXTENT_CH
+    else:
+        extent = EXTENT_BC
+
+    if (
+        path_data_processed
+        / "cordex_processed"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+    ).is_dir():
         # Set output directory
         if args.output_dir is None:
             output_dir = (
@@ -1656,12 +2155,17 @@ if __name__ == "__main__":
             climate_scenario=args.climate_scenario,
             path_data_processed=path_data_processed,
             output_dir=output_dir,
-            extent=EXTENT_PREVAH,
+            extent=extent,
             temp_res_override=args.temp_res,
         )
 
         # Run validation
-        validator.validate_all_variables(variables=args.variables)
+        if args.summary:
+            # Create summary plot
+            validator._plot_summary_statistics(variables=args.variables)
+        else:
+            # Run full validation
+            validator.validate_all_variables(variables=args.variables)
     else:
         print(
             f"Processed data for {args.climate_model_chain} - {args.climate_scenario} not found in {path_data_processed}/cordex_processed"

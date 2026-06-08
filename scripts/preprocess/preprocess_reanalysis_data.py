@@ -1,20 +1,21 @@
-import sys
-
-sys.path.append("../..")
-
-import json
-from pathlib import Path
 import argparse
-from time import time
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
-from src.data_processing.load_data import ClimateReanalysisData
-from src.utils.cdo_commands import cdo_remap
-import shutil
-import xarray as xr
-from src.data_processing.test_climate_data import has_duplicate_coords, is_time_sorted
-import dask
-from dask.diagnostics import ProgressBar
+import json
 import os
+import shutil
+from pathlib import Path
+from time import time
+
+import dask
+import xarray as xr
+from dask.diagnostics import ProgressBar
+
+from cordex2energy.data_processing.load_data import ClimateReanalysisData
+from cordex2energy.data_processing.test_climate_data import (
+    has_duplicate_coords,
+    is_time_sorted,
+)
+from cordex2energy.utils.cdo_commands import cdo_remap
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING
 
 
 def get_paths_cerra_data(

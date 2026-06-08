@@ -4,12 +4,12 @@ import sys
 import dask
 from pathlib import Path
 
-sys.path.append("../..")
 
-from src.data_processing.load_data import ClimateModelData
-from src.conversion_energy.aggregate_data import aggregate_data_per_country
+
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
 from dask.diagnostics import ProgressBar
-from src.utils.constants import EXTENT_CH, BC_SUBDAILY_CHUNKS
+from cordex2energy.utils.constants import EXTENT_CH, BC_SUBDAILY_CHUNKS
 import pandas as pd
 
 vars = ["tas", "rsds", "sfcWind", "huss", "psl"]

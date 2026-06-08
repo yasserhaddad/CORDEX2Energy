@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 sys.path.append("../..")
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
 
 dask.config.set(num_workers=15, threads_per_worker=16)
 dask.config.set(

@@ -1,12 +1,8 @@
-import sys
-
-sys.path.append("../..")
-
 import json
 import argparse
 from pathlib import Path
-from src.utils.cdo_commands import cdo_remap
-from src.utils.utils_load_data import get_orog_cordex_data_path
+from cordex2energy.utils.cdo_commands import cdo_remap
+from cordex2energy.utils.utils_load_data import get_orog_cordex_data_path
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process climate data.")

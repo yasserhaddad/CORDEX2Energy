@@ -1,37 +1,35 @@
-import os
-import sys
-
-sys.path.append("../..")
-
 import argparse
 import ast
 import json
+import os
 import shutil
+import sys
 from pathlib import Path
 from time import time
 
 import dask
-from dask.diagnostics import ProgressBar
 import pandas as pd
-from src.data_processing.load_data import ClimateModelData
-from src.data_processing.test_climate_data import (
+from dask.diagnostics import ProgressBar
+
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.data_processing.test_climate_data import (
+    has_complete_timesteps,
     has_duplicate_coords,
     has_identical_random_timesteps,
     is_time_sorted,
-    has_complete_timesteps,
 )
-from src.data_processing.timesteps_adjustments import (
+from cordex2energy.data_processing.timesteps_adjustments import (
     extract_adjusted_timesteps,
     fill_missing_timesteps,
     fill_missing_timesteps_ffill_like,
 )
-from src.utils.cdo_commands import cdo_remap
-from src.utils.constants import (
+from cordex2energy.utils.cdo_commands import cdo_remap
+from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     EXTENT_BC_MRRO,
     REGRIDDED_CHUNKS,
 )
-from src.utils.utils_load_data import get_raw_cordex_data_paths
+from cordex2energy.utils.utils_load_data import get_raw_cordex_data_paths
 
 
 def extract_year(path_cordex: Path) -> int:

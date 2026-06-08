@@ -12,17 +12,17 @@ import xarray as xr
 import rioxarray as rxr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
 
-from src.conversion_energy.demand import (
+
+from cordex2energy.conversion_energy.demand import (
     process_population_data,
     normalize_population_data,
     compute_cdm_hdm_xr,
 )
-from src.conversion_energy.aggregate_data import aggregate_data_per_country
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import REDUCED_NETCDF_ENCODINGS, BC_SUBDAILY_CHUNKS, EXTENT_BC
-from src.utils.utils_xarray import sel_extent
+from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import REDUCED_NETCDF_ENCODINGS, BC_SUBDAILY_CHUNKS, EXTENT_BC
+from cordex2energy.utils.utils_xarray import sel_extent
 
 import os
 

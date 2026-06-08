@@ -1,7 +1,7 @@
 import sys
 import warnings
 
-sys.path.append("../..")
+
 
 import argparse
 import json
@@ -10,10 +10,10 @@ from pathlib import Path
 
 import xarray as xr
 
-from src.data_processing.convert_climate_vars import (
+from cordex2energy.data_processing.convert_climate_vars import (
     convert_wind_components_to_speed,
 )
-from src.utils.utils_load_data import (
+from cordex2energy.utils.utils_load_data import (
     get_components_climate_model_chain,
     get_raw_cordex_data_paths,
 )

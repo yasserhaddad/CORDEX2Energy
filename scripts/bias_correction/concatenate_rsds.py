@@ -1,21 +1,27 @@
 import sys
-sys.path.append("../..")
+
 
 from pathlib import Path
 import xarray as xr
 import dask
 from dask.diagnostics import ProgressBar
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
-
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
+import time
+# Start timing
+start_time = time.time()
 # Configure Dask
-dask.config.set(num_workers=16, threads_per_worker=2)
+dask.config.set(num_workers=16, threads_per_worker=4)
 dask.config.set({"array.chunk-size": "400MiB"})
 dask.config.set({"distributed.worker.memory.target": 0.75})
 dask.config.set({"distributed.worker.memory.spill": 0.8})
 dask.config.set({"distributed.worker.memory.pause": 0.9})
 
 var = "hurs"
-climate_model_chain = "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
+# var = "ps"
+# climate_model_chain = "CNRM-ALADIN63_MOHC-HadGEM2-ES_r1i1p1"
+# climate_model_chain = "CNRM-ALADIN63_NCC-NorESM1-M_r1i1p1"
+# climate_model_chain = "CNRM-ALADIN63_MPI-M-MPI-ESM-LR_r1i1p1"
+climate_model_chain = "MOHC-HadREM3-GA7-05_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 climate_scenario = "rcp85"
 temp_res = "3hr"
 input_path = Path(f"/net/exo/landclim_nobackup/yhaddad/clim2energy-ch/cordex_processed/{climate_model_chain}_{climate_scenario}/temp/bias_corrected/{var}/{temp_res}")
@@ -72,4 +78,4 @@ ds_combined.to_zarr(output_path, mode="w", encoding=zarr_encoding)
 print("✓ Concatenation complete!")
 print(f"  Time range: {ds_combined.time.min().values} to {ds_combined.time.max().values}")
 print(f"  Total timesteps: {len(ds_combined.time)}")
-
+print(f"  Total time taken: {(time.time() - start_time)/60:.2f} minutes")

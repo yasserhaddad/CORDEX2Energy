@@ -8,12 +8,21 @@ from pathlib import Path
 
 import xarray as xr
 
-sys.path.append("../..")
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS
 
-def aggregate_to_daily(ds: xr.Dataset, drop_leap_days: bool = False) -> xr.Dataset:
-    """Aggregate dataset to daily means and optionally remove Feb 29 entries."""
-    daily = ds.resample(time="1D").mean()
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS
+
+def aggregate_to_daily(ds: xr.Dataset, drop_leap_days: bool = False, function: str = "mean") -> xr.Dataset:
+    """Aggregate dataset to daily means, mins or max and optionally remove Feb 29 entries."""
+
+    if function == "mean":
+        daily = ds.resample(time="1D").mean()
+    elif function == "min":
+        daily = ds.resample(time="1D").min()
+    elif function == "max":
+        daily = ds.resample(time="1D").max()
+    else:
+        raise ValueError(f"Unsupported aggregation function: {function}")
+
     if drop_leap_days:
         daily = daily.sel(
             time=~((daily["time"].dt.month == 2) & (daily["time"].dt.day == 29))

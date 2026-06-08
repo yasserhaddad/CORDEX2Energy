@@ -10,13 +10,13 @@ import xarray as xr
 
 sys.path.append("../..")
 
-from src.conversion_energy.pv import (
+from cordex2energy.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_for_grid,
 )
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_CH
-from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, EXTENT_CH
+from cordex2energy.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")

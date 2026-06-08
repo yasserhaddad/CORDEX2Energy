@@ -6,31 +6,31 @@ import time
 from pathlib import Path
 import os
 
-os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
-os.environ["MKL_NUM_THREADS"] = "1"  # MKL
-os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
-os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
-
 import dask
 import pandas as pd
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
 
-from src.conversion_energy.pv import (
+
+from cordex2energy.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_from_config,
 )
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import (
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     BC_SUBDAILY_CHUNKS,
     EXTENT_BC,
     EXTENT_CH,
 )
-from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
-from src.conversion_energy.aggregate_data import aggregate_data_per_country
+from cordex2energy.utils.utils_xarray import get_nan_mask, sel_extent, match_instaneous_to_mean_values
+from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
+
+os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # MKL
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
+os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")
@@ -88,6 +88,24 @@ if __name__ == "__main__":
 
     print("Loading data")
     extent = EXTENT_BC if args.scope == "europe" else EXTENT_CH
+    spatial_chunks = {"lat": 30, "lon": 30}
+
+    if args.scope == "europe":
+        path_tas = (
+            path_data_processed
+            / "cordex_processed"
+            / f"{args.climate_model_chain}_{args.climate_scenario}"
+            / "regridded"
+            / "3hr"
+            / "tas.zarr"
+        )
+
+        da_nan_mask = get_nan_mask(
+            xr.open_zarr(path_tas, chunks="auto").sel(time="1991-01-01 00:00").drop_vars("time").squeeze(),
+            var_name="tas",
+            climate_model_chain=args.climate_model_chain,
+        ).drop_vars("height").chunk({"lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]})
+
     ds_rsds_bc = ClimateModelData(
         path_data_processed
         / "cordex_processed"
@@ -113,7 +131,7 @@ if __name__ == "__main__":
         ),
         extent,
     )
-    ds_orog = ds_orog.chunk({"lat": 20, "lon": 20})
+    ds_orog = ds_orog.chunk(spatial_chunks)
     step = 30
     # Determine time slices based on ds_tas_bc time range
     time_index = pd.to_datetime(ds_rsds_bc.ds_data.time.values)
@@ -219,7 +237,7 @@ if __name__ == "__main__":
         pv_step_start = time.time()
         step_start = time.time()
 
-        with ProgressBar(dt=60):
+        with ProgressBar(dt=10):
             ds_pv = []
             ds_pv_agg = []
             for direction, azimuth in azimuths.items():
@@ -230,13 +248,13 @@ if __name__ == "__main__":
                     ds_pv.append(
                         compute_pv_from_config(
                             ds_rsds_bc.ds_data.rsds.chunk(
-                                {"time": -1, "lat": 20, "lon": 20}
+                                {"time": -1, "lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]}
                             ),
                             ds_tas_bc.ds_data.tas.chunk(
-                                {"time": -1, "lat": 20, "lon": 20}
+                                {"time": -1, "lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]}
                             ),
                             ds_sfcWind_bc.ds_data.sfcWind.chunk(
-                                {"time": -1, "lat": 20, "lon": 20}
+                                {"time": -1, "lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]}
                             ),
                             tilt=tilt,
                             azimuth=azimuth,
@@ -248,16 +266,23 @@ if __name__ == "__main__":
                         ]
                     )
 
-                    if args.scope == "europe":
-                        step_start = time.time()
-                        ds_pv_agg.append(aggregate_data_per_country(
-                            ds_pv[-1],
-                            method="median_and_better",
-                            offshore=False,
-                        ))
-
             print("Saving data")
             ds_pv = xr.merge(ds_pv)
+            if args.scope == "europe":
+                ds_pv = ds_pv.where(~da_nan_mask)
+
+            for var_name in ds_pv.data_vars:
+                parts = var_name.split("_")
+                tilt_val = int(parts[1])
+                direction = parts[3]
+                ds_pv[var_name].attrs.update({
+                    "long_name": f"Normalised rooftop PV capacity factor — tilt {tilt_val}° azimuth {direction}",
+                    "units": "fraction (0–1)",
+                    "tilt_deg": tilt_val,
+                    "azimuth_deg": azimuths[direction],
+                    "azimuth_direction": direction,
+                })
+
             zarr_encoding = {
                 var: {
                     "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
@@ -270,8 +295,26 @@ if __name__ == "__main__":
             )
             print(f"PV data saved to {output_path_zarr}")
 
-            if len(ds_pv_agg) > 0 and args.scope == "europe":
-                ds_pv_agg = xr.merge(ds_pv_agg)
+            if args.scope == "europe":
+                ds_pv = xr.open_zarr(output_path_zarr, chunks="auto")
+                ds_pv_agg = aggregate_data_per_country(
+                    ds_pv,
+                    method="median_and_better",
+                    offshore=False,
+                )
+                for var_name in ds_pv_agg.data_vars:
+                    parts = var_name.split("_")
+                    tilt_val = int(parts[1])
+                    direction = parts[3]
+                    ds_pv_agg[var_name].attrs.update({
+                        "long_name": f"Country-aggregated rooftop PV capacity factor — tilt {tilt_val}° azimuth {direction}",
+                        "units": "fraction (0–1)",
+                        "tilt_deg": tilt_val,
+                        "azimuth_deg": azimuths[direction],
+                        "azimuth_direction": direction,
+                        "aggregation": "median_and_better",
+                        "domain": "onshore",
+                    })
                 ds_pv_agg.to_netcdf(output_path_agg, mode="w")
                 print(f"PV aggregated data saved to {output_path_agg}")
 

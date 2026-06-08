@@ -165,3 +165,39 @@ paths*.json
 **/logs/
 data/
 figs/validation/
+figs/speed2zero/
+.vscode/
+archive/
+
+# Figures and outputs (already generated, don't track)
+figs/**
+!figs/.gitkeep
+!figs/README.md
+
+# Notebook outputs
+**/.ipynb_checkpoints/
+*.ipynb[_outputs]
+
+# Pycache
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Logs from scripts
+**/logs/
+*.log
+
+# Large data files
+*.zarr/
+*.nc
+*.grib
+*.csv
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Environment exports (too specific)
+env_bias_correction.yml
+CLAUDE.md

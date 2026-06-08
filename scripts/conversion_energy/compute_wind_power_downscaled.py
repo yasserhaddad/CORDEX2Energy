@@ -1,7 +1,6 @@
 import argparse
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -9,14 +8,12 @@ import dask
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
-
-from src.conversion_energy.wind import (
+from cordex2energy.conversion_energy.wind import (
     CH_TURBINES,
     compute_smooth_power_curve,
     compute_wind_power,
 )
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
 
 
 def main():

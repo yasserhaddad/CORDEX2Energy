@@ -1,9 +1,6 @@
-import os
-import sys
-
-sys.path.append("../..")
-
+import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -13,10 +10,9 @@ import xarray as xr
 from dask.diagnostics import ProgressBar
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
 
-from src.conversion_energy.wind import compute_power_law_exponent
-from src.data_processing.load_data import ClimateReanalysisData
-from src.utils.constants import REFERENCE_PERIOD
-import argparse
+from cordex2energy.conversion_energy.wind import compute_power_law_exponent
+from cordex2energy.data_processing.load_data import ClimateReanalysisData
+from cordex2energy.utils.constants import REFERENCE_PERIOD
 
 
 def configure_dask():

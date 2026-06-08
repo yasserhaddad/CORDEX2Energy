@@ -1,7 +1,4 @@
 import argparse
-import sys
-
-sys.path.append("../..")
 import json
 import time
 from pathlib import Path
@@ -9,15 +6,15 @@ from pathlib import Path
 import dask
 import xarray as xr
 from dask.diagnostics import ProgressBar
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS, BC_SUBDAILY_CHUNKS
-from src.data_processing.convert_climate_vars import (
+
+from cordex2energy.data_processing.convert_climate_vars import (
     calculate_specific_humidity,
 )
-
-# dask.config.set({'distributed.worker.multiprocessing-method': 'forkserver'})
-# dask.config.set({'distributed.worker.use-file-locking': 'False'})
-# dask.config.set(num_workers=10, scheduler="processes")
-# dask.config.set({"array.chunk-size": "500MiB"})
+from cordex2energy.utils.constants import (
+    BC_DAILY_CHUNKS,
+    BC_SUBDAILY_CHUNKS,
+    COMPRESSED_ZARR_ENCODING,
+)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Aggregate climate data.")
@@ -95,6 +92,8 @@ if __name__ == "__main__":
             "units": "kg kg-1",
             "standard_name": "specific humidity",
         }
+        print("Specific humidity calculated. Saving data...")
+        print("ds_huss:", ds_huss.time.values[0], "to", ds_huss.time.values[-1])
 
         # Save the specific humidity data
         target_chunks = BC_DAILY_CHUNKS if args.temp_res == "day" else BC_SUBDAILY_CHUNKS

@@ -1,9 +1,5 @@
-import os
-import sys
-
-sys.path.append("../..")
-
 import json
+import os
 import pprint
 import time
 from pathlib import Path
@@ -13,9 +9,13 @@ import numpy as np
 import seaborn as sns
 import xarray as xr
 from dask.diagnostics import ProgressBar
-from src.conversion_energy.wind import extrapolate_wind_speed
-from src.data_processing.load_data import ClimateModelData, ClimateReanalysisData
-from src.utils.utils_xarray import sel_extent, tile_dataset_to_target_time
+
+from cordex2energy.conversion_energy.wind import extrapolate_wind_speed
+from cordex2energy.data_processing.load_data import (
+    ClimateModelData,
+    ClimateReanalysisData,
+)
+from cordex2energy.utils.utils_xarray import sel_extent, tile_dataset_to_target_time
 
 sns.set_style("whitegrid", {"grid.color": ".93"})
 

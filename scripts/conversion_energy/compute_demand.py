@@ -12,37 +12,43 @@ import xarray as xr
 import rioxarray as rxr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
 
-from src.conversion_energy.demand import (
+
+from cordex2energy.conversion_energy.demand import (
     process_population_data,
     normalize_population_data,
     compute_cdd_hdd_xr,
 )
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS, EXTENT_BC
-from src.utils.utils_xarray import sel_extent
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS, EXTENT_BC
+from cordex2energy.utils.utils_xarray import sel_extent
 
 import os
-os.environ["OMP_NUM_THREADS"] = "1"       # OpenMP
-os.environ["MKL_NUM_THREADS"] = "1"       # MKL
+
+os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
+os.environ["MKL_NUM_THREADS"] = "1"  # MKL
 os.environ["OPENBLAS_NUM_THREADS"] = "1"  # OpenBLAS
-os.environ["NUMEXPR_NUM_THREADS"] = "1"   # numexpr
+os.environ["NUMEXPR_NUM_THREADS"] = "1"  # numexpr
 
 dask.config.set({"logging.distributed": "error"})
-# dask.config.set(num_workers=15, scheduler="processes")
-# dask.config.set(num_workers=15, threads_per_worker=1, scheduler="processes")
 dask.config.set(num_workers=15, threads_per_worker=16)
 dask.config.set({"array.chunk-size": "400MiB"})
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(description="Compute heating and cooling degree days.")
+    parser = argparse.ArgumentParser(
+        description="Compute heating and cooling degree days."
+    )
     parser.add_argument(
         "paths_file", type=str, help="Path to the JSON file containing paths."
     )
     parser.add_argument("climate_model_chain", type=str, help="Climate model chain.")
     parser.add_argument("climate_scenario", type=str, help="Climate scenario.")
+    parser.add_argument(
+        "--population_weighted",
+        action="store_true",
+        help="Compute population-weighted demand.",
+    )
     return parser.parse_args()
 
 
@@ -59,7 +65,9 @@ def setup_tmp_directories(paths, climate_model_chain, climate_scenario):
     return tmp_energy_data_dir
 
 
-def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_bc):
+def load_and_process_data(
+    paths, climate_model_chain, climate_scenario, chunks_bc, population_weighted=False
+):
     extent_pop = {
         "lat_min": EXTENT_BC["lat_min"] - 1,
         "lat_max": EXTENT_BC["lat_max"] + 1,
@@ -96,11 +104,15 @@ def load_and_process_data(paths, climate_model_chain, climate_scenario, chunks_b
     da_worldpop_coarse = normalize_population_data(
         da_worldpop_coarse, mask_countries_worldpop
     ).where(da_worldpop_coarse > 0, np.nan)
+    if not population_weighted:
+        da_worldpop_coarse = xr.where(~da_worldpop_coarse.isnull(), 1, 1)
 
-    da_worldpop_coarse = da_worldpop_coarse.chunk({
-        "lat": ds_tas_bc.ds_data.chunksizes["lat"][0],
-        "lon": ds_tas_bc.ds_data.chunksizes["lon"][0]
-    })
+    da_worldpop_coarse = da_worldpop_coarse.chunk(
+        {
+            "lat": ds_tas_bc.ds_data.chunksizes["lat"][0],
+            "lon": ds_tas_bc.ds_data.chunksizes["lon"][0],
+        }
+    )
 
     return ds_tas_bc, da_worldpop_coarse
 
@@ -120,9 +132,7 @@ def split_time_range(ds_tas_bc, nb_splits=3):
     split_points.append(time_range[-1].floor("D") + pd.Timedelta(days=1))
 
     time_ranges = [
-        time_range[
-            (time_range >= split_points[i]) & (time_range < split_points[i + 1])
-        ]
+        time_range[(time_range >= split_points[i]) & (time_range < split_points[i + 1])]
         for i in range(len(split_points) - 1)
     ]
     return time_ranges
@@ -212,7 +222,11 @@ def main():
 
     print("Loading and processing data")
     ds_tas_bc, da_worldpop_coarse = load_and_process_data(
-        paths, args.climate_model_chain, args.climate_scenario, BC_SUBDAILY_CHUNKS
+        paths,
+        args.climate_model_chain,
+        args.climate_scenario,
+        BC_SUBDAILY_CHUNKS,
+        population_weighted=args.population_weighted,
     )
 
     time_ranges = split_time_range(ds_tas_bc, nb_splits=5)

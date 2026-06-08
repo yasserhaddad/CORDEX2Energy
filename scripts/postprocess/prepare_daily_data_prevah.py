@@ -6,8 +6,8 @@ import json
 from dask.diagnostics import ProgressBar
 from pathlib import Path
 
-sys.path.append("../..")
-from src.data_processing.load_data import ClimateModelData
+
+from cordex2energy.data_processing.load_data import ClimateModelData
 
 VARIABLES = [
     "huss",

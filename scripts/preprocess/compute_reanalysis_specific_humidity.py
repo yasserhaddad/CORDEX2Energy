@@ -1,16 +1,16 @@
 import sys
 
-sys.path.append("../..")
+
 
 import time
 import json
 import xarray as xr
 from pathlib import Path
 
-from src.data_processing.convert_climate_vars import (
+from cordex2energy.data_processing.convert_climate_vars import (
     calculate_specific_humidity,
 )
-from src.utils.cdo_commands import cdo_setgrid
+from cordex2energy.utils.cdo_commands import cdo_setgrid
 
 with open("../../paths_so4.json") as f:
     paths = json.load(f)

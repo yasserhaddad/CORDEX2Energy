@@ -8,7 +8,7 @@ from dask.diagnostics import ProgressBar
 import sys
 
 sys.path.append("../..")
-from src.utils.constants import (
+from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     BC_SUBDAILY_CHUNKS
 )

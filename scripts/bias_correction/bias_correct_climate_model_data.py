@@ -2,7 +2,7 @@ import sys
 
 import pandas as pd
 
-sys.path.append("../..")
+
 
 import argparse
 import json
@@ -12,16 +12,16 @@ from pathlib import Path
 
 import dask
 from dask.diagnostics import ProgressBar
-from src.data_processing.bias_correction import BiasCorrection
-from src.data_processing.load_data import ClimateModelData, ClimateReanalysisData
-from src.utils.constants import (
+from cordex2energy.data_processing.bias_correction import BiasCorrection
+from cordex2energy.data_processing.load_data import ClimateModelData, ClimateReanalysisData
+from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     EXTENT_BC,
     EXTENT_BC_MRRO,
     FUTURE_PERIOD,
     REFERENCE_PERIOD,
 )
-from src.utils.utils_xarray import get_time_offset, get_time_resolution
+from cordex2energy.utils.utils_xarray import get_time_offset, get_time_resolution
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process climate data.")
@@ -250,6 +250,9 @@ if __name__ == "__main__":
     if args.variable == "clt":
         ds_bias_corrected = ds_bias_corrected.clip(0, 100)
         print("Values clipped to [0, 100].")
+    if args.variable == "pr":
+        ds_bias_corrected = ds_bias_corrected.clip(0)
+        print("Negative precipitation values set to 0.")
 
     print("Bias correction completed. Saving data...")
     # Save the bias-corrected data

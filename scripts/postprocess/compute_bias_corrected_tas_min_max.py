@@ -7,8 +7,8 @@ from pathlib import Path
 
 import xarray as xr
 
-sys.path.append("../..")
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS
+
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_DAILY_CHUNKS
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Aggregate climate data.")

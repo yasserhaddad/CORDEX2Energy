@@ -12,15 +12,15 @@ from dask.diagnostics import ProgressBar
 
 sys.path.append("../..")
 
-from src.conversion_energy.pv import (
+from cordex2energy.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_for_grid,
     PVOutput,
 )
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
-from src.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
-from src.conversion_energy.aggregate_data import aggregate_data_per_country
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS
+from cordex2energy.utils.utils_xarray import sel_extent, match_instaneous_to_mean_values
+from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")

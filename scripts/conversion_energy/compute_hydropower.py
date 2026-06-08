@@ -1,10 +1,10 @@
 import argparse
 import json
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
-import os
 
 os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
 os.environ["MKL_NUM_THREADS"] = "1"  # MKL
@@ -16,20 +16,23 @@ import numpy as np
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
-sys.path.append("../..")
 
-from src.conversion_energy.hydropower import simple_hydropower_potential
-from src.data_processing.load_data import ClimateModelData
-from src.utils.constants import (
+
+from cordex2energy.conversion_energy.hydropower import (
+    compute_hydropower_reservoir_inflows,
+    compute_ror_hydropower_potential,
+    mean_discharge_weight,
+    persistence_weight,
+    simple_hydropower_potential,
+)
+from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.utils.constants import (
+    BC_DAILY_CHUNKS,
     COMPRESSED_ZARR_ENCODING,
     EXTENT_BC,
-    EXTENT_BC_MRRO,
-    REGRIDDED_CHUNKS,
-    BC_DAILY_CHUNKS,
     REFERENCE_PERIOD,
+    REGRIDDED_CHUNKS,
 )
-from src.utils.cdo_commands import regrid_with_xesmf
-from src.utils.utils_xarray import sel_extent
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")
@@ -74,25 +77,35 @@ if __name__ == "__main__":
         "lon_min": EXTENT_BC["lon_min"],
         "lon_max": EXTENT_BC["lon_max"],
     }
+    model_name = f"{args.climate_model_chain}_{args.climate_scenario}"
+    if model_name == "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp26":
+        model_name = "CNRM-26"
+        filename_template = "Qrouted_historical_*_m3s.zarr"
+    elif model_name == "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1_rcp85":
+        model_name = "CNRM-85"
+        filename_template = "Qrouted_historical_*_m3s.zarr"
+    else:
+        filename_template = "Qrouted_historical_*.zarr"
+    nb_folders = len(list((path_routed_runoff / model_name).glob("*/")))
+    list_q_routed = list(
+        (path_routed_runoff / model_name).glob(f"*/{filename_template}")
+    )
+    if any("new.zarr" in str(p) for p in list_q_routed):
+        list_q_routed = [
+            p for p in list_q_routed if "new.zarr" in str(p)
+        ]  # Prefer new.zarr files
 
-    # ds_routed = ClimateModelData(
-    #     list(
-    #         (
-    #             path_routed_runoff
-    #             / f"{args.climate_model_chain}_{args.climate_scenario}"
-    #         ).glob("*/Qrouted_historical_*.zarr")
-    #     ),
-    #     chunks="auto",
-    #     extent=extent,
-    #     check_calendar=False,
-    # )
+    if len(list_q_routed) == 0:
+        raise ValueError(
+            f"No routed runoff data found for {args.climate_model_chain} {args.climate_scenario} in {path_routed_runoff}"
+        )
+    if len(list_q_routed) != nb_folders:
+        raise ValueError(
+            f"Expected {nb_folders} routed runoff files for {args.climate_model_chain} {args.climate_scenario}, but found {len(list_q_routed)} in {path_routed_runoff}"
+        )
+
     ds_routed = ClimateModelData(
-        list(
-            (
-                path_routed_runoff
-                / "CNRM-85"
-            ).glob("*/Qrouted_historical_*m3s.zarr")
-        ),
+        list_q_routed,
         chunks="auto",
         extent=extent,
         check_calendar=False,
@@ -100,30 +113,8 @@ if __name__ == "__main__":
     nan_mask = np.isnan(ds_routed.ds_data.isel(time=0))
     ds_routed.ds_data = ds_routed.ds_data.fillna(1).chunk(REGRIDDED_CHUNKS)
 
-    # # Build target EUR-11 grid from any regridded FX file
-    # ds_target = (
-    #     sel_extent(
-    #         xr.open_dataset(
-    #             sorted(
-    #                 (
-    #                     path_data_processed
-    #                     / "cordex_processed"
-    #                     / f"{args.climate_model_chain}_{args.climate_scenario}"
-    #                     / "regridded"
-    #                     / "fx"
-    #                 ).glob("*.nc")
-    #             )[0]
-    #         ),
-    #         extent=EXTENT_BC,
-    #     )[["lat", "lon"]]
-    #     .sortby("lat")
-    #     .sortby("lon")
-    # ).chunk({"lat": BC_DAILY_CHUNKS["lat"], "lon": BC_DAILY_CHUNKS["lon"]})
-
-    # Regrid with cached weights (bilinear by default)
-    weights_file = output_path_hydropower.parent / "weights_hydro_to_eur11_bilinear.nc"
     with ProgressBar(dt=60):
-        ds_hydro = simple_hydropower_potential(
+        ds_hydro = compute_ror_hydropower_potential(
             ds_routed.ds_data,
             reference_period=REFERENCE_PERIOD,
             quantile_max=0.95,
@@ -132,25 +123,14 @@ if __name__ == "__main__":
         )
         ds_hydro = (
             ds_hydro.where(~nan_mask)
-            .rename({"Qrouted": "hydropower"})
+            .rename({"Qrouted": "hydropower_ror"})
             .convert_calendar("standard", align_on="year")
             .chunk(BC_DAILY_CHUNKS)
         )
 
-        # ds_hydro = regrid_with_xesmf(
-        #     ds_hydro,
-        #     ds_target,
-        #     var_names=["hydropower"],
-        #     method="bilinear",
-        #     weights_path=weights_file if weights_file.exists() else None,
-        #     reuse_weights=weights_file.exists(),
-        #     extrap_method=None,
-        #     chunks=BC_DAILY_CHUNKS,
-        # )
-        # ds_hydro = xr.open_dataset(output_path.parent / (output_path.stem + "_regridded.nc"))
         output_path_zarr = (
             output_path_hydropower
-            / f"hydropower_{args.climate_model_chain}_{args.climate_scenario}.zarr"
+            / f"hydropower_ror_{args.climate_model_chain}_{args.climate_scenario}.zarr"
         )
         zarr_encoding = {
             var: {
@@ -159,6 +139,69 @@ if __name__ == "__main__":
             }
             for var in ds_hydro.data_vars
         }
-        # .chunk(BC_DAILY_CHUNKS)
+
         ds_hydro.to_zarr(output_path_zarr, mode="w", encoding=zarr_encoding)
-        # (output_path.parent / (output_path.stem + "_regridded.nc")).unlink()
+
+    with ProgressBar(dt=60):
+        ds_hydro_reservoir = compute_hydropower_reservoir_inflows(
+            ds_routed.ds_data, storage_window=7, dim="time"
+        )
+        ds_hydro_reservoir = (
+            ds_hydro_reservoir.where(~nan_mask)
+            .rename({"Qrouted": "hydropower_reservoir"})
+            .convert_calendar("standard", align_on="year")
+            .chunk(BC_DAILY_CHUNKS)
+        )
+
+        output_path_zarr_reservoir = (
+            output_path_hydropower
+            / f"hydropower_reservoir_{args.climate_model_chain}_{args.climate_scenario}.zarr"
+        )
+        zarr_encoding_reservoir = {
+            var: {
+                "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
+                "chunks": tuple(BC_DAILY_CHUNKS.values()),
+            }
+            for var in ds_hydro_reservoir.data_vars
+        }
+
+        ds_hydro_reservoir.to_zarr(
+            output_path_zarr_reservoir, mode="w", encoding=zarr_encoding_reservoir
+        )
+
+    # # Compute weights and save to NetCDF
+    # print("Computing hydropower weights...")
+    # with ProgressBar(dt=60):
+    #     # Compute mean discharge weight
+    #     weight_mean_discharge = mean_discharge_weight(
+    #         ds_routed.ds_data,
+    #         reference_period=REFERENCE_PERIOD,
+    #         exponent=0.5,
+    #         dim="time",
+    #     ).rename({"Qrouted": "mean_discharge_weight"})
+
+    #     # Compute persistence weight
+    #     weight_persistence = persistence_weight(
+    #         ds_routed.ds_data,
+    #         reference_period=REFERENCE_PERIOD,
+    #         dim="time",
+    #     ).rename({"Qrouted": "persistence_weight"})
+
+    #     # Combine weights into a single dataset
+    #     ds_weights = xr.merge([
+    #         weight_mean_discharge.where(~nan_mask),
+    #         weight_persistence.where(~nan_mask),
+    #     ])
+
+    #     # Compute and save
+    #     ds_weights = ds_weights.compute()
+
+    #     output_path_weights = (
+    #         output_path_hydropower
+    #         / f"hydropower_weights_{args.climate_model_chain}_{args.climate_scenario}.nc"
+    #     )
+    #     if output_path_weights.exists():
+    #         output_path_weights.unlink()
+
+    #     ds_weights.to_netcdf(output_path_weights)
+    #     print(f"Weights saved to {output_path_weights}")

@@ -1,46 +1,34 @@
 paths_file="../../paths_so4.json"
-models=("CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
-        "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
-        "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
-        "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
-        "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
-        "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
-        "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
-        "MOHC-HadREM3-GA7-05_MPI-M-MPI-ESM-LR_r1i1p1"
-        "MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
-        "CNRM-ALADIN63_MOHC-HadGEM2-ES_r1i1p1"
-        "CNRM-ALADIN63_NCC-NorESM1-M_r1i1p1"
-        "CNRM-ALADIN63_MPI-M-MPI-ESM-LR_r1i1p1"
-        "MOHC-HadREM3-GA7-05_CNRM-CERFACS-CNRM-CM5_r1i1p1")
-scenarios=(
-    "rcp26"
-    "rcp45"
-    "rcp85"
-    "rcp26"
-    "rcp85"
-    "rcp26"
-    "rcp85"
-    "rcp85"
-    "rcp85"
-    "rcp85"
-    "rcp85"
-    "rcp85"
-    "rcp85"
-)
-
 models=(
-    # "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
-    # "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
+    "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
+    # "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
+    "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
     "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
     "MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
+    "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
+    "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
+    "MOHC-HadREM3-GA7-05_MPI-M-MPI-ESM-LR_r1i1p1"
+    "MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
+    "CNRM-ALADIN63_MOHC-HadGEM2-ES_r1i1p1"
+    "CNRM-ALADIN63_NCC-NorESM1-M_r1i1p1"
+    "CNRM-ALADIN63_MPI-M-MPI-ESM-LR_r1i1p1"
+    "MOHC-HadREM3-GA7-05_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 )
 scenarios=(
-    # "rcp26"
-    # "rcp85"
+    "rcp26"
+    # "rcp45"
+    "rcp85"
     "rcp26"
     "rcp85"
+    "rcp26"
+    "rcp85"
+    "rcp85"
+    "rcp85"
+    "rcp85"
+    "rcp85"
+    "rcp85"
+    "rcp85"
 )
-
 
 current_date=$(date +"%Y%m%d")
 
@@ -65,8 +53,8 @@ for m_idx in "${!models[@]}"; do
     # Create a directory for logs if it doesn't exist
     mkdir -p "logs/${scope}/${model}_${scenario}"
 
-    echo "Computing wind power for scope ${scope}..."
-    nice -10 python -u compute_wind_power.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
+    # echo "Computing wind power for scope ${scope}..."
+    # nice -10 python -u compute_wind_power.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
 
     # echo "Computing PV for scope ${scope}..."
     # nice -10 python -u compute_pv.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
@@ -76,4 +64,10 @@ for m_idx in "${!models[@]}"; do
 
     # echo "Computing Demand..."
     # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
+
+    # echo "Computing (population-weighted) Demand..."
+    # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" --population_weighted 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
+
+    echo "Computing TYNDP aggregates..."
+    nice -10 python -u compute_tyndp_aggregates.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/tyndp_aggregates_${current_date}.log"
 done

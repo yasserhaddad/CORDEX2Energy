@@ -1,18 +1,13 @@
 import json
-import xarray as xr
-from pathlib import Path
-import dask
-from dask.diagnostics import ProgressBar
-import pandas as pd
-
-import sys
-
-sys.path.append("../..")
-from src.utils.utils_xarray import sel_extent
-
-from src.utils.constants import EXTENT_CH, EXTENT_BC
-
 import os
+from pathlib import Path
+
+import dask
+import xarray as xr
+from dask.diagnostics import ProgressBar
+
+from cordex2energy.utils.constants import EXTENT_BC, EXTENT_CH
+from cordex2energy.utils.utils_xarray import sel_extent
 
 os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
 os.environ["MKL_NUM_THREADS"] = "1"  # MKL

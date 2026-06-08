@@ -8,7 +8,7 @@ renames variables to {variable}_daily, and saves to zarr format.
 
 import sys
 
-sys.path.append("../..")
+
 
 import json
 from pathlib import Path
@@ -20,7 +20,7 @@ import dask
 from dask.diagnostics import ProgressBar
 import os
 
-from src.utils.constants import COMPRESSED_ZARR_ENCODING
+from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING
 
 
 if __name__ == "__main__":

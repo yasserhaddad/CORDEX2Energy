@@ -10,13 +10,13 @@ from dask.diagnostics import ProgressBar
 
 sys.path.append("../..")
 
-from src.conversion_energy.wind import (
+from cordex2energy.conversion_energy.wind import (
     CH_HUB_HEIGHTS,
     CH_TURBINES,
     EUROPE_HUB_HEIGHTS,
     EUROPE_TURBINES,
 )
-from src.conversion_energy.aggregate_data import aggregate_data_per_country
+from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute wind power.")

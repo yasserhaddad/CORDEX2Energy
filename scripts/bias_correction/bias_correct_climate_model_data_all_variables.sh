@@ -3,17 +3,17 @@
 paths_file="../../paths_so4.json"
 # model="CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 # model="CNRM-ALADIN63_MOHC-HadGEM2-ES_r1i1p1"
-# model="CNRM-ALADIN63_NCC-NorESM1-M_r1i1p1"
+model="CNRM-ALADIN63_NCC-NorESM1-M_r1i1p1"
 # model="CNRM-ALADIN63_MPI-M-MPI-ESM-LR_r1i1p1"
 
 # model="MOHC-HadREM3-GA7-05_MOHC-HadGEM2-ES_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_MPI-M-MPI-ESM-LR_r1i1p1"
 # model="MOHC-HadREM3-GA7-05_NCC-NorESM1-M_r1i1p1"
-model="MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
+# model="MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
 
-wind_multiple_heights="False"
-scenario="rcp26"
+wind_multiple_heights="True"
+scenario="rcp85"
 
 # Create a directory for logs if it doesn't exist
 mkdir -p "logs/${model}_${scenario}"
@@ -41,10 +41,20 @@ variables_ref=("ssrd")
 temp_res_array=("3hr" )
 height_ref_array=("None")
 
-variables=("rsds")
-variables_ref=("ssrd_daily")
-temp_res_array=("day" )
+# variables=("rsds")
+# variables_ref=("ssrd_daily")
+# temp_res_array=("day" )
+# height_ref_array=("None")
+
+variables=("mrro")
+variables_ref=("ro")
+temp_res_array=("day")
 height_ref_array=("None")
+
+variables=("wind100m" "wind150m")
+variables_ref=("ws" "ws")
+temp_res_array=("3hr" "3hr")
+height_ref_array=(100 150)
 
 nr_processes=35
 memory_limit="auto"

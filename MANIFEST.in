@@ -1,0 +1,24 @@
+# Include documentation files
+include README.md
+include LICENSE
+include Data documentation.md
+
+# Include configuration files
+include pyproject.toml
+include paths.json
+include paths_so4.json
+
+# Include data directories
+recursive-include data *.csv
+
+# Exclude certain files and directories
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store
+recursive-exclude * .ipynb_checkpoints
+exclude .gitignore
+
+# Exclude archive and notebooks from distribution
+prune archive
+prune notebooks
+prune figs

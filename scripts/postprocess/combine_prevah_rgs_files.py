@@ -7,8 +7,8 @@ import sys
 from dask.diagnostics import ProgressBar
 from pathlib import Path
 
-sys.path.append("../..")
-from src.utils.constants import (
+
+from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING
 )
 
@@ -39,7 +39,11 @@ if __name__ == "__main__":
         ds_rgs = xr.open_mfdataset(path_rgs.glob("*.nc"), combine="by_coords").rename({
             "lon2": "x", "lat2": "y"
         })
-
+        ds_rgs["RGS"].attrs = {
+            "long_name": "Runoff",
+            "units": "mm/day",
+            "standard_name": "runoff",
+        }
         zarr_encoding = {
             var: {
                 "compressor": COMPRESSED_ZARR_ENCODING["compressor"],

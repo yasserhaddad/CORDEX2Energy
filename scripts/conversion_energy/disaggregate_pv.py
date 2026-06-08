@@ -1,78 +1,209 @@
+"""Disaggregate 3-hourly PV output to hourly resolution.
+
+Three methods are supported:
+
+  clearsky    — pvlib Ineichen clear-sky profile weighting.
+                Fully Dask-parallel; no rsds input needed.
+
+  catmullrom  — Radiation-weighted, local Catmull-Rom cubic interpolation.
+                Fully Dask-parallel; rsds loaded with BC_SUBDAILY_CHUNKS.
+
+  scipy       — Radiation-weighted, global scipy CubicSpline interpolation.
+                Requires the full time axis in a single chunk; input data are
+                automatically rechunked to REGRIDDED_CHUNKS before processing.
+
+Usage
+-----
+python disaggregate_pv.py paths_so4.json \\
+    CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1 rcp85 \\
+    --scope ch --method catmullrom
+"""
+
 import argparse
 import json
+import time
+from pathlib import Path
+
+import dask
 import xarray as xr
+from dask.diagnostics import ProgressBar
 
-def interpolate_radiation(rad_3h):
-    """Interpolate 3-hourly radiation to hourly using cubic spline."""
-    return rad_3h.resample(time='1H').interpolate('cubic')
+from cordex2energy.conversion_energy.disaggregate import (
+    disaggregate_dataset_clearsky,
+    disaggregate_dataset_radiation,
+)
+from cordex2energy.utils.constants import (
+    BC_SUBDAILY_CHUNKS,
+    COMPRESSED_ZARR_ENCODING,
+    EXTENT_CH,
+    EXTENT_BC,
+    REGRIDDED_CHUNKS,
+)
+from cordex2energy.utils.utils_xarray import sel_extent
 
-def normalize_radiation_weights(rad_1h, rad_3h):
-    """Compute hourly radiation weights normalized to 3-hour block sums."""
-    # Get 3-hourly block boundaries
-    group = rad_1h.time.to_index().floor('3H')
-    rad_1h_grouped = rad_1h.groupby(xr.DataArray(group, dims='time', coords={'time': rad_1h.time}))
+# Direction → azimuth degrees
+AZIMUTHS = {"N": 0, "NE": 45, "E": 90, "SE": 135,
+            "S": 180, "SW": 225, "W": 270, "NW": 315}
 
-    def scale_group(grouped_rad):
-        total = grouped_rad.sum(dim='time')
-        return xr.where(total > 0, grouped_rad / total, 0)
+# Hourly output chunks: keep lat/lon from BC_SUBDAILY_CHUNKS, expand time
+# to one calendar year (8760 h) so each chunk covers a full year.
+HOURLY_CHUNKS = {**BC_SUBDAILY_CHUNKS, "time": 8760}
 
-    weights = rad_1h_grouped.map(scale_group)
-    return weights
 
-def disaggregate_pv(pv_3h, rad_3h):
-    """Disaggregate 3-hourly PV estimates into hourly values using radiation."""
-    rad_1h = interpolate_radiation(rad_3h)
-    weights = normalize_radiation_weights(rad_1h, rad_3h)
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Disaggregate 3-hourly PV to hourly.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "paths_file",
+        help="Path to the JSON file containing data paths (e.g. paths_so4.json).",
+    )
+    parser.add_argument("climate_model_chain", help="Climate model chain identifier.")
+    parser.add_argument("climate_scenario",    help="RCP scenario (e.g. rcp85).")
+    parser.add_argument(
+        "--scope",
+        choices=["ch", "europe"],
+        default="ch",
+        help="Spatial scope: 'ch' (Switzerland) or 'europe'. Default: ch.",
+    )
+    parser.add_argument(
+        "--method",
+        choices=["clearsky", "catmullrom", "scipy"],
+        default="catmullrom",
+        help=(
+            "Disaggregation method. "
+            "'catmullrom' (default): radiation-weighted, Dask-parallel. "
+            "'scipy': radiation-weighted, global spline (slower, auto-rechunked). "
+            "'clearsky': pvlib Ineichen profiles, no rsds needed."
+        ),
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=5.0,
+        help="rsds night mask threshold [W/m²]. Only used for radiation methods.",
+    )
 
-    # Forward-fill PV to hourly for shape
-    pv_hourly_approx = pv_3h.resample(time='1H').ffill()
-
-    # Apply weights to disaggregate
-    pv_weighted = pv_hourly_approx * weights
-
-    # Re-aggregate and scale to ensure sum match
-    pv_reagg = pv_weighted.resample(time='3H').sum()
-    scaling = xr.where(pv_reagg > 0, pv_3h / pv_reagg, 0)
-    scaling_hourly = scaling.resample(time='1H').ffill()
-
-    pv_hourly_scaled = pv_weighted * scaling_hourly
-    return pv_hourly_scaled
-
-def mask_night(pv_hourly, rad_1h, threshold=5):
-    """Mask PV output during nighttime using a radiation threshold."""
-    is_day = rad_1h > threshold
-    return pv_hourly.where(is_day, 0)
-
-def load_data(paths, climate_model_chain, climate_scenario):
-    """Load PV and radiation data using a standardized dictionary."""
-    pv_path = paths["pv_3h"][climate_model_chain][climate_scenario]
-    rad_path = paths["radiation_3h"][climate_model_chain][climate_scenario]
-
-    pv_3h = xr.open_dataset(pv_path, chunks={"time": 100})["pv"]
-    rad_3h = xr.open_dataset(rad_path, chunks={"time": 100})["radiation"]
-
-    return pv_3h, rad_3h
-
-def save_output(pv_hourly, out_path):
-    """Save the final hourly PV dataset."""
-    ds = xr.Dataset({"pv_hourly": pv_hourly})
-    ds.to_netcdf(out_path)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Disaggregate 3-hourly PV to hourly using radiation.")
-    parser.add_argument("paths_file", type=str, help="Path to the JSON file containing paths.")
-    parser.add_argument("climate_model_chain", type=str, help="Climate model chain.")
-    parser.add_argument("climate_scenario", type=str, help="Climate scenario.")
-    parser.add_argument("--output_path", type=str, default="pv_hourly.nc", help="Output NetCDF file path.")
+    dask.config.set(num_workers=15, threads_per_worker=16)
+    dask.config.set(
+        {
+            "distributed.worker.memory.target": 0.7,
+            "distributed.worker.memory.spill": 0.8,
+            "distributed.worker.memory.pause": 0.9,
+            "array.chunk-size": "512MiB",
+            "logging.distributed": "error",
+        }
+    )
 
     args = parser.parse_args()
+
     paths = json.load(open(args.paths_file))
+    path_data_processed = Path(paths["path_data_processed"])
 
-    pv_3h, rad_3h = load_data(paths, args.climate_model_chain, args.climate_scenario)
+    extent = EXTENT_CH if args.scope == "ch" else EXTENT_BC
 
-    # Disaggregation pipeline
-    pv_hourly_raw = disaggregate_pv(pv_3h, rad_3h)
-    rad_1h = interpolate_radiation(rad_3h)
-    pv_hourly_final = mask_night(pv_hourly_raw, rad_1h)
+    # ------------------------------------------------------------------
+    # Input paths
+    # ------------------------------------------------------------------
+    pv_zarr = (
+        path_data_processed
+        / "energy"
+        / args.scope
+        / "pv"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / f"pv_{args.climate_model_chain}_{args.climate_scenario}.zarr"
+    )
+    rsds_zarr = (
+        path_data_processed
+        / "cordex_processed"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / "bias_corrected"
+        / "3hr"
+        / "rsds.zarr"
+    )
 
-    save_output(pv_hourly_final, args.output_path)
+    # ------------------------------------------------------------------
+    # Output path
+    # ------------------------------------------------------------------
+    output_zarr = (
+        path_data_processed
+        / "energy"
+        / args.scope
+        / "pv_hourly"
+        / f"{args.climate_model_chain}_{args.climate_scenario}"
+        / f"pv_hourly_{args.climate_model_chain}_{args.climate_scenario}.zarr"
+    )
+    output_zarr.parent.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Load 3-hourly PV (always loaded with BC_SUBDAILY_CHUNKS)
+    # ------------------------------------------------------------------
+    print(f"Loading PV data from {pv_zarr}")
+    ds_pv = xr.open_zarr(pv_zarr, chunks=BC_SUBDAILY_CHUNKS)
+
+    # ------------------------------------------------------------------
+    # Disaggregate
+    # ------------------------------------------------------------------
+    t0 = time.time()
+
+    if args.method == "clearsky":
+        print("Method: clear-sky profiles (pvlib Ineichen)")
+        ds_pv_hourly = disaggregate_dataset_clearsky(ds_pv, AZIMUTHS)
+
+    else:
+        # Both radiation methods need rsds
+        print(f"Loading rsds from {rsds_zarr}")
+        rsds_3h = sel_extent(
+            xr.open_zarr(rsds_zarr, chunks=BC_SUBDAILY_CHUNKS)["rsds"],
+            extent,
+        )
+        # Align spatial coordinates to PV grid
+        rsds_3h = rsds_3h.sel(
+            lat=ds_pv[list(ds_pv.data_vars)[0]].lat,
+            lon=ds_pv[list(ds_pv.data_vars)[0]].lon,
+            method="nearest",
+            tolerance=0.05,
+        )
+
+        if args.method == "scipy":
+            # scipy CubicSpline needs the full time axis in one Dask chunk.
+            # Rechunk to REGRIDDED_CHUNKS: small spatial tiles, time=-1.
+            print(
+                "Method: scipy cubic spline — rechunking to REGRIDDED_CHUNKS "
+                f"{REGRIDDED_CHUNKS} (time=-1, small spatial tiles)"
+            )
+            ds_pv   = ds_pv.chunk(REGRIDDED_CHUNKS)
+            rsds_3h = rsds_3h.chunk(REGRIDDED_CHUNKS)
+            ds_pv_hourly = disaggregate_dataset_radiation(
+                ds_pv, rsds_3h, method="scipy", threshold=args.threshold
+            )
+
+        else:  # catmullrom
+            print("Method: Catmull-Rom (local, Dask-parallel)")
+            ds_pv_hourly = disaggregate_dataset_radiation(
+                ds_pv, rsds_3h, method="catmullrom", threshold=args.threshold
+            )
+
+    # ------------------------------------------------------------------
+    # Save to Zarr
+    # ------------------------------------------------------------------
+    zarr_encoding = {
+        var: {
+            "compressor": COMPRESSED_ZARR_ENCODING["compressor"],
+            "chunks": tuple(HOURLY_CHUNKS.values()),
+        }
+        for var in ds_pv_hourly.data_vars
+    }
+
+    print(f"\nWriting hourly PV to {output_zarr}")
+    with ProgressBar(dt=60):
+        ds_pv_hourly.chunk(HOURLY_CHUNKS).to_zarr(
+            output_zarr, mode="w", encoding=zarr_encoding
+        )
+
+    print(f"Done in {(time.time() - t0) / 60:.1f} min — saved to {output_zarr}")
+
+
+if __name__ == "__main__":
+    main()

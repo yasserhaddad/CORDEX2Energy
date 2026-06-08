@@ -37,7 +37,7 @@ models=(
     # "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
     # "MOHC-HadREM3-GA7-05_ICHEC-EC-EARTH_r12i1p1"
     "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
-    # "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
+    "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
     "CNRM-ALADIN63_CNRM-CERFACS-CNRM-CM5_r1i1p1"
 )
 scenarios=(
@@ -46,7 +46,7 @@ scenarios=(
     # "rcp26"
     # "rcp85"
     "rcp26"
-    # "rcp45"
+    "rcp45"
     "rcp85"
 )
 
@@ -63,15 +63,20 @@ scenarios=(
 # temp_res_array=("day" )
 # height_ref_array=("None")
 
-variables=("ps")
-variables_ref=("sp_daily")
-temp_res_array=("day" )
-height_ref_array=("None")
+# variables=("ps")
+# variables_ref=("sp_daily")
+# temp_res_array=("day" )
+# height_ref_array=("None")
 
 # variables=("hurs")
 # variables_ref=("2r_daily")
 # temp_res_array=("day")
 # height_ref_array=(2)
+
+variables=("hurs")
+variables_ref=("2r")
+temp_res_array=("3hr")
+height_ref_array=(2)
 
 nr_processes=35
 memory_limit="auto"
