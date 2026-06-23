@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 import yaml
 
@@ -13,11 +12,8 @@ def load_warming_level_periods(
     yml_path: Union[str, Path],
     warming_levels: list[float] | None = None,
     gcms: Union[list[str], dict[str, str], None] = None,
-) -> pd.DataFrame:
+) -> dict[tuple[str, str], dict[str, dict[float, dict | None]]]:
     """Load warming-level periods from a pre-computed YAML file.
-
-    Each row in the returned DataFrame describes the 20-year window centred on
-    the first year a given model/scenario exceeded a warming threshold.
 
     The YAML format is the one produced by Mathias Hauser's ``warming_levels.py``
     script (e.g. ``cmip5_warming_levels_all_ens_1850_1900.yml``).  Each section
@@ -42,11 +38,23 @@ def load_warming_level_periods(
 
     Returns
     -------
-    pd.DataFrame
-        Columns: ``model``, ``ensemble``, ``scenario``, ``warming_level``,
-        ``start_year``, ``end_year``, ``central_year``.
-        Sorted by model / ensemble / scenario / warming_level.
-        Empty DataFrame if no matching entries are found.
+    dict
+        Nested dict keyed by ``(model, ensemble)``::
+
+            {
+                (model, ensemble): {
+                    scenario: {
+                        warming_level: {
+                            "start_year": int,
+                            "end_year": int,
+                            "central_year": int,
+                        }
+                    }
+                }
+            }
+
+        Missing combinations (level not reached, model absent from the file)
+        are simply not present in the dict; use ``.get()`` to handle them.
     """
     def _suffix_to_float(suffix: str) -> float:
         # "15" → 1.5,  "20" → 2.0,  "061" → 0.61
@@ -76,7 +84,7 @@ def load_warming_level_periods(
     else:
         model_set, ens_map = set(gcms), None
 
-    records = []
+    result: dict[tuple[str, str], dict[str, dict[float, dict]]] = {}
     for wl, key in keys_to_read.items():
         for entry in data.get(key, []):
             model, ens = entry["model"], entry["ensemble"]
@@ -85,28 +93,14 @@ def load_warming_level_periods(
             if ens_map is not None and ens_map.get(model) != ens:
                 continue
             sy = entry["start_year"]
-            records.append(
-                {
-                    "model": model,
-                    "ensemble": ens,
-                    "scenario": entry["exp"],
-                    "warming_level": wl,
-                    "start_year": sy,
-                    "end_year": entry["end_year"],
-                    "central_year": sy + 10,
-                }
-            )
-    if not records:
-        return pd.DataFrame(
-            columns=["model", "ensemble", "scenario", "warming_level",
-                     "start_year", "end_year", "central_year"]
-        )
+            me_key = (model, ens)
+            result.setdefault(me_key, {}).setdefault(entry["exp"], {})[wl] = {
+                "start_year": sy,
+                "end_year": entry["end_year"],
+                "central_year": sy + 10,
+            }
 
-    return (
-        pd.DataFrame(records)
-        .sort_values(["model", "ensemble", "scenario", "warming_level"])
-        .reset_index(drop=True)
-    )
+    return result
 
 
 def compute_gmst_anomalies(

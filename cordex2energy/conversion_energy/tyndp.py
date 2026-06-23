@@ -1307,8 +1307,6 @@ def preprocess_hydro_ror(
     return ds_subdaily
 
 
-
-
 def aggregate_by_balancing_zones(ds, country_dim="country"):
     """
     Groups and sums an xarray Dataset or DataArray along the country dimension
@@ -1414,17 +1412,12 @@ def load_tyndp_battery_capacities(
     path_excel: Union[str, Path],
     scenario: str = "HIGH",
     year: int = 2050,
-) -> pd.Series:
+    return_separate: bool = False,
+) -> "pd.Series | tuple[pd.Series, pd.Series]":
     """Load TYNDP 2024 battery energy storage capacity projections.
 
-    Reads sheet ``1.5.`` (prosumer batteries) and ``1.6.`` (utility batteries),
-    sums both, and returns **GWh per ISO2 country code**.
-
-    The raw sheets store values in **MWh** and use TYNDP bidding-zone codes
-    (e.g. ``"DE00"``, ``"ITSI"``).  This function strips the trailing suffix to
-    obtain the two-character ISO2 code, aggregates all bidding zones for the
-    same country, and converts MWh → GWh.  Aggregate rows (``"TOTAL"``,
-    ``"EU-TOTAL"``) are excluded before summing.
+    Reads sheet ``1.5.`` (prosumer batteries) and ``1.6.`` (utility batteries).
+    By default sums both and returns **GWh per ISO2 country code**.
 
     Parameters
     ----------
@@ -1434,12 +1427,16 @@ def load_tyndp_battery_capacities(
         Scenario name as it appears in the column header (e.g. ``"HIGH"``).
     year : int
         Projection year (e.g. ``2050``).
+    return_separate : bool
+        When ``True`` return ``(s_prosumer_gwh, s_utility_gwh)`` as two
+        separate Series instead of their sum.  Useful when prosumer and
+        utility batteries are dispatched with different strategies.
 
     Returns
     -------
-    pd.Series
-        Total battery energy capacity in **GWh**, indexed by two-character
-        ISO2 country code.
+    pd.Series or tuple[pd.Series, pd.Series]
+        Total (or prosumer + utility separately) battery energy capacity in
+        **GWh**, indexed by two-character ISO2 country code.
     """
     path_excel = Path(path_excel)
     col = f"{year}_{scenario}"
@@ -1454,11 +1451,15 @@ def load_tyndp_battery_capacities(
         d["iso2"] = d["Country"].str[:2]
         return d.groupby("iso2")[col].sum().fillna(0.0)
 
-    s_prosumer = _to_iso2_series(_parse_supply_sheet(path_excel, "1.5."))
-    s_utility = _to_iso2_series(_parse_supply_sheet(path_excel, "1.6."))
+    s_prosumer = _to_iso2_series(_parse_supply_sheet(path_excel, "1.5.")) / 1_000.0
+    s_utility  = _to_iso2_series(_parse_supply_sheet(path_excel, "1.6.")) / 1_000.0
+    s_prosumer.name = f"prosumer_battery_capacity_gwh_{year}_{scenario}"
+    s_utility.name  = f"utility_battery_capacity_gwh_{year}_{scenario}"
 
-    # Raw values are in MWh — convert to GWh
-    total_gwh = s_prosumer.add(s_utility, fill_value=0.0) / 1_000.0
+    if return_separate:
+        return s_prosumer, s_utility
+
+    total_gwh = s_prosumer.add(s_utility, fill_value=0.0)
     total_gwh.name = f"battery_capacity_gwh_{year}_{scenario}"
     return total_gwh
 
@@ -1808,14 +1809,19 @@ def apply_battery_dispatch(
     battery_duration_h: float = 4.0,
     roundtrip_efficiency: float = 0.90,
     initial_soc_fraction: float = 0.50,
+    dispatch_lookahead_h: float = 0.0,
     zone_dim: str = "zone",
     rl_var: str = "residual_load",
 ) -> xr.Dataset:
-    """Apply greedy battery dispatch zone-by-zone to reduce residual load extremes.
+    """Apply battery dispatch zone-by-zone to reduce residual load extremes.
 
-    Simulates a single aggregated battery store per zone.  Strategy: charge
-    whenever residual load is negative (surplus), discharge whenever it is
-    positive (deficit), respecting power limits and energy capacity.
+    Charging is always greedy: absorb surplus whenever residual load is negative.
+    Discharge strategy depends on ``dispatch_lookahead_h``:
+
+    - ``0`` (default): greedy — discharge as much as needed immediately.
+    - ``> 0``: lookahead rationing — count how many positive-RL steps lie within
+      the next ``dispatch_lookahead_h`` hours and spread the stored energy evenly
+      across them, preventing over-discharge on the first peak.
 
     One-way efficiency is ``sqrt(roundtrip_efficiency)``; losses are applied
     symmetrically on charge and on discharge.
@@ -1835,6 +1841,9 @@ def apply_battery_dispatch(
         Round-trip efficiency (fraction, 0–1).
     initial_soc_fraction : float
         Starting state-of-charge as a fraction of total capacity (0–1).
+    dispatch_lookahead_h : float
+        Lookahead window in hours for discharge rationing.  ``0`` = greedy
+        (current behaviour, backward-compatible default).
     zone_dim : str
         Name of the zone coordinate in ``ds_residual_zonal``.
     rl_var : str
@@ -1843,12 +1852,16 @@ def apply_battery_dispatch(
     Returns
     -------
     xr.Dataset
-        Copy of the input with two additional variables:
+        Copy of the input with three additional variables:
 
         - ``residual_load_with_batteries`` – dispatch-adjusted RL (GWh/3h)
         - ``soc_gwh`` – battery state-of-charge trace (GWh)
+        - ``battery_dispatch_gwh`` – net battery power per step (GWh/3h);
+          positive = discharging (reduces RL), negative = charging (absorbs surplus)
     """
     one_way_eff = np.sqrt(roundtrip_efficiency)
+    # Number of 3-hour steps to look ahead when rationing discharge
+    lookahead_steps = max(1, round(dispatch_lookahead_h / 3.0)) if dispatch_lookahead_h > 0.0 else 0
 
     zones = list(ds_residual_zonal[zone_dim].values)
     if isinstance(da_capacity_gwh, pd.Series):
@@ -1881,12 +1894,18 @@ def apply_battery_dispatch(
             if np.isnan(rl_t):
                 soc_arr[iz, t] = soc
                 continue
-            if rl_t < 0.0:  # surplus → charge
+            if rl_t < 0.0:  # surplus → charge greedily
                 charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
                 soc += charge * one_way_eff
                 rl_new[iz, t] = rl_t + charge
             elif rl_t > 0.0:  # deficit → discharge
-                discharge = min(rl_t, max_pwr, soc * one_way_eff)
+                if lookahead_steps > 0:
+                    future = rl_arr[iz, t : t + lookahead_steps]
+                    remaining = 1 + int(np.sum(future > 0.0))
+                    target = soc * one_way_eff / remaining
+                else:
+                    target = soc * one_way_eff
+                discharge = min(rl_t, max_pwr, target)
                 soc -= discharge / one_way_eff
                 rl_new[iz, t] = rl_t - discharge
             soc_arr[iz, t] = soc
@@ -1909,6 +1928,369 @@ def apply_battery_dispatch(
             dims=rl_da.dims,
             attrs={"long_name": "Battery state-of-charge", "units": "GWh"},
         ).transpose(*orig_dims)
+    )
+    # Positive = discharge (reduces RL); negative = charge (absorbs surplus)
+    ds_out["battery_dispatch_gwh"] = (
+        xr.DataArray(
+            rl_arr - rl_new,
+            coords=rl_da.coords,
+            dims=rl_da.dims,
+            attrs={
+                "long_name": "Battery net dispatch per 3h step",
+                "units": "GWh per 3h step",
+                "sign_convention": "positive = discharging (reduces residual load)",
+            },
+        ).transpose(*orig_dims)
+    )
+    return ds_out
+
+
+def apply_prosumer_battery_dispatch(
+    ds_residual_zonal: xr.Dataset,
+    da_pv_generation: xr.DataArray,
+    da_capacity_gwh: xr.DataArray | pd.Series,
+    battery_duration_h: float = 4.0,
+    roundtrip_efficiency: float = 0.90,
+    initial_soc_fraction: float = 0.50,
+    zone_dim: str = "zone",
+    rl_var: str = "residual_load",
+) -> xr.Dataset:
+    """Apply PV-aware prosumer battery dispatch to reduce residual load extremes.
+
+    Prosumer batteries are co-located with rooftop PV.  Dispatch strategy:
+
+    - **Charge** only during solar hours (``da_pv_generation > 0``) and only
+      when there is a generation surplus (``residual_load < 0``).
+    - **Discharge** only when the sun is absent (``da_pv_generation == 0``) and
+      there is a grid deficit (``residual_load > 0``).
+    - **Daily SOC reset** at midnight: prosumers cannot plan across days, so the
+      SOC is reset to ``initial_soc_fraction × capacity`` at each day boundary.
+
+    Parameters
+    ----------
+    ds_residual_zonal : xr.Dataset
+        Must contain ``rl_var`` with dimensions (``zone_dim``, ``"time"``),
+        values in **GWh per 3-hour step**.
+    da_pv_generation : xr.DataArray
+        PV generation signal (any non-negative units) with the same
+        ``zone_dim`` and ``"time"`` dimensions as ``ds_residual_zonal``.
+        Only the sign (> 0 vs == 0) is used to detect solar vs. non-solar
+        timesteps.
+    da_capacity_gwh : xr.DataArray or pd.Series
+        Prosumer battery energy capacity in GWh indexed by zone name.
+    battery_duration_h : float
+        Energy-to-power ratio in hours (sets max power per 3h step).
+    roundtrip_efficiency : float
+        Round-trip efficiency (fraction, 0–1).
+    initial_soc_fraction : float
+        Starting (and daily reset) state-of-charge as a fraction of capacity.
+    zone_dim : str
+        Name of the zone coordinate.
+    rl_var : str
+        Name of the residual-load variable.
+
+    Returns
+    -------
+    xr.Dataset
+        Same structure as :func:`apply_battery_dispatch`: adds
+        ``residual_load_with_batteries``, ``soc_gwh``, ``battery_dispatch_gwh``.
+    """
+    one_way_eff = np.sqrt(roundtrip_efficiency)
+
+    zones = list(ds_residual_zonal[zone_dim].values)
+    if isinstance(da_capacity_gwh, pd.Series):
+        cap_by_zone = np.array([da_capacity_gwh.get(z, 0.0) for z in zones], dtype=float)
+    else:
+        z_vals = list(da_capacity_gwh[zone_dim].values)
+        cap_by_zone = np.array(
+            [float(da_capacity_gwh.sel({zone_dim: z}).values) if z in z_vals else 0.0
+             for z in zones],
+            dtype=float,
+        )
+
+    rl_da = ds_residual_zonal[rl_var].transpose(zone_dim, "time")
+    rl_arr = rl_da.values.copy()
+    n_zones, n_time = rl_arr.shape
+
+    # Align PV to (zone_dim, time) — use zero if a zone is absent
+    pv_da = da_pv_generation.transpose(zone_dim, "time")
+    pv_zones = list(pv_da[zone_dim].values)
+    if pv_zones == zones:
+        pv_arr = pv_da.values
+    else:
+        pv_arr = np.zeros_like(rl_arr)
+        for iz, z in enumerate(zones):
+            if z in pv_zones:
+                pv_arr[iz] = pv_da.sel({zone_dim: z}).values
+
+    time_index = pd.DatetimeIndex(rl_da["time"].values)
+    time_hours = time_index.hour
+
+    rl_new = rl_arr.copy()
+    soc_arr = np.zeros_like(rl_arr)
+
+    for iz in range(n_zones):
+        cap = cap_by_zone[iz]
+        if cap <= 0.0:
+            continue
+
+        max_pwr = cap / battery_duration_h * 3.0
+        soc = cap * initial_soc_fraction
+
+        for t in range(n_time):
+            # Daily SOC reset at midnight (day boundary)
+            if t > 0 and time_hours[t] == 0:
+                soc = cap * initial_soc_fraction
+
+            rl_t = rl_arr[iz, t]
+            if np.isnan(rl_t):
+                soc_arr[iz, t] = soc
+                continue
+
+            solar_on = pv_arr[iz, t] > 0.0
+
+            if solar_on and rl_t < 0.0:
+                # PV surplus → charge prosumer battery
+                charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
+                soc += charge * one_way_eff
+                rl_new[iz, t] = rl_t + charge
+            elif (not solar_on) and rl_t > 0.0:
+                # No sun, grid deficit → discharge prosumer battery
+                discharge = min(rl_t, max_pwr, soc * one_way_eff)
+                soc -= discharge / one_way_eff
+                rl_new[iz, t] = rl_t - discharge
+
+            soc_arr[iz, t] = soc
+
+    orig_dims = ds_residual_zonal[rl_var].dims
+    ds_out = ds_residual_zonal.copy()
+    ds_out["residual_load_with_batteries"] = (
+        xr.DataArray(
+            rl_new,
+            coords=rl_da.coords,
+            dims=rl_da.dims,
+            attrs={"long_name": "Residual load after prosumer battery dispatch", "units": "GWh per 3h step"},
+        ).transpose(*orig_dims)
+    )
+    ds_out["soc_gwh"] = (
+        xr.DataArray(
+            soc_arr,
+            coords=rl_da.coords,
+            dims=rl_da.dims,
+            attrs={"long_name": "Prosumer battery state-of-charge", "units": "GWh"},
+        ).transpose(*orig_dims)
+    )
+    ds_out["battery_dispatch_gwh"] = (
+        xr.DataArray(
+            rl_arr - rl_new,
+            coords=rl_da.coords,
+            dims=rl_da.dims,
+            attrs={
+                "long_name": "Prosumer battery net dispatch per 3h step",
+                "units": "GWh per 3h step",
+                "sign_convention": "positive = discharging (reduces residual load)",
+            },
+        ).transpose(*orig_dims)
+    )
+    return ds_out
+
+
+# ---------------------------------------------------------------------------
+# Reservoir hydro dispatch
+# ---------------------------------------------------------------------------
+
+
+def _optimize_reservoir_gurobi(
+    residual_load: np.ndarray,
+    inflow: np.ndarray,
+    E_max: float,
+    P_max: float,
+    min_storage_level_fraction: float | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Solve the annual reservoir dispatch QP using Gurobi.
+
+    Minimises ``Σ (residual_load[t] − dispatch[t])²`` subject to a water-balance
+    equality, storage bounds, non-negative spillage, and a cyclical constraint
+    ``storage[T] = storage[0]``.
+
+    Parameters
+    ----------
+    residual_load :
+        3-hourly residual load for one calendar year (GWh per 3h step).
+    inflow :
+        3-hourly inflow for the same year (GWh per 3h step), same length.
+    E_max :
+        Maximum reservoir storage capacity (GWh).
+    P_max :
+        Maximum turbine discharge per 3h step (GWh = installed GW × 3).
+    min_storage_level_fraction :
+        If set, storage cannot drop below ``min_storage_level_fraction × E_max``.
+
+    Returns
+    -------
+    (dispatch, net_load, storage) arrays of length T, or (None, None, None)
+    if Gurobi does not find an optimal solution.
+    """
+    import gurobipy as gp
+    from gurobipy import GRB
+
+    T = len(residual_load)
+    E_min = E_max * min_storage_level_fraction if min_storage_level_fraction is not None else 0.0
+
+    env = gp.Env(empty=True)
+    env.setParam("OutputFlag", 0)
+    env.setParam("LogFile", "")
+    env.start()
+    m = gp.Model("Reservoir_Dispatch", env=env)
+
+    E = m.addMVar(shape=T + 1, lb=E_min, ub=E_max, name="E")
+    G = m.addMVar(shape=T, lb=0.0, ub=P_max, name="G")
+    S = m.addMVar(shape=T, lb=0.0, name="S")
+    net_load = m.addMVar(shape=T, lb=-GRB.INFINITY, name="net_load")
+
+    m.addConstr(E[1:] == E[:-1] + inflow - G - S, name="Storage_Balance")
+    m.addConstr(E[0] == E[T], name="Cyclicity")
+    m.addConstr(net_load == residual_load - G, name="Net_Load_Def")
+    m.setObjective(net_load @ net_load, GRB.MINIMIZE)
+    m.optimize()
+
+    if m.Status == GRB.OPTIMAL:
+        return G.X, net_load.X, E.X[:-1]
+    return None, None, None
+
+
+def apply_reservoir_dispatch(
+    ds_residual_load: xr.Dataset,
+    ds_hydro_inflow: xr.Dataset,
+    df_hydropower_capacities: pd.DataFrame,
+    power_col: str = "p_nom_discharge[GW]",
+    energy_col: str = "E_store[TWh]",
+    min_storage_level_fraction: float | None = None,
+    rl_var: str = "residual_load",
+    country_dim: str = "country",
+    verbose: bool = True,
+) -> xr.Dataset:
+    """Apply annual reservoir hydro dispatch to reduce country-level residual load.
+
+    For each country with installed reservoir capacity, and for each calendar year,
+    solves a QP (via Gurobi) that minimises the sum of squared net residual load
+    subject to a water-balance equation, storage bounds, and a cyclical storage
+    constraint ``s[end] = s[start]``.  This represents perfect-foresight optimal
+    operation within each year without inter-annual carry-over.
+
+    The weekly inflow in *ds_hydro_inflow* is linearly interpolated to a 3-hourly
+    grid and divided by 56 (7 days × 8 three-hour steps) to obtain GWh per 3h step.
+
+    Parameters
+    ----------
+    ds_residual_load :
+        Country-level residual load, dims ``(country, time)``, 3-hourly GWh.
+    ds_hydro_inflow :
+        Weekly reservoir inflow, dims ``(country, time)``, in GWh/week.
+        Country coordinate must use ISO2 codes.
+    df_hydropower_capacities :
+        DataFrame containing hydropower capacities, indexed by ISO2 country code.
+    power_col :
+        Column name in *df_hydropower_capacities* to use.
+    energy_col :
+        Column name in *df_hydropower_capacities* to use.
+    min_storage_level_fraction :
+        If set, storage cannot drop below this fraction of E_max at any step.
+        Useful to model operational buffers.  Default ``None`` (no floor).
+    rl_var :
+        Name of the residual-load variable in *ds_residual_load*.
+    country_dim :
+        Name of the country dimension.
+    verbose :
+        If ``True``, print per-country progress.
+
+    Returns
+    -------
+    xr.Dataset
+        Copy of *ds_residual_load* with *rl_var* replaced by the
+        dispatch-adjusted series and two additional variables:
+        ``"reservoir_dispatch_gwh"`` and ``"reservoir_storage_gwh"``.
+    """
+    orig_dims = ds_residual_load[rl_var].dims
+    rl_da = ds_residual_load[rl_var].transpose(country_dim, "time")
+    rl_arr = rl_da.values.copy()
+    time_index = pd.DatetimeIndex(ds_residual_load.time.values)
+    all_countries = list(ds_residual_load[country_dim].values)
+    inflow_countries = set(ds_hydro_inflow[country_dim].values)
+
+    dispatch_arr = np.zeros_like(rl_arr)
+    storage_arr = np.zeros_like(rl_arr)
+
+    reservoir_countries = df_hydropower_capacities.index
+
+    for country in reservoir_countries:
+        if country not in inflow_countries or country not in all_countries:
+            continue
+
+        # Use the position in all_countries so the arrays are always indexed correctly.
+        ic = all_countries.index(country)
+
+        E_max = float(df_hydropower_capacities.loc[country, energy_col]) * 1000 # Max reservoir energy capacity (TWh → GWh)
+        P_max = float(df_hydropower_capacities.loc[country, power_col]) * 3.0  # Max turbine power capacity (GW → GWh/3h)
+
+        if E_max <= 0 or P_max <= 0:
+            continue
+
+        # Resample weekly inflow to 3h once for this country (interpolate then normalise)
+        inflow_weekly = ds_hydro_inflow["inflow"].sel({country_dim: country}).to_series()
+        inflow_3h = inflow_weekly.resample("3h").interpolate(method="linear") / (7 * 8)
+
+        if verbose:
+            print(f"  Reservoir dispatch: {country}  E_max={E_max:.0f} GWh  P_max={P_max / 3:.1f} GW")
+
+        for year in np.unique(time_index.year):
+            year_mask = time_index.year == year
+            time_year = time_index[year_mask]
+            rl_year = rl_arr[ic, year_mask]
+
+            inflow_year = (
+                inflow_3h
+                .reindex(time_year, method="nearest")
+                .bfill()
+                .ffill()
+                .fillna(0.0)
+                .values
+            )
+
+            T = min(len(rl_year), len(inflow_year))
+            dispatch, net_load, storage = _optimize_reservoir_gurobi(
+                rl_year[:T], inflow_year[:T], E_max, P_max, min_storage_level_fraction
+            )
+
+            if dispatch is None:
+                if verbose:
+                    print(f"    {year}: Gurobi infeasible, skipping")
+                continue
+
+            yr_idx = np.where(year_mask)[0][:T]
+            rl_arr[ic, yr_idx] = net_load
+            dispatch_arr[ic, yr_idx] = dispatch
+            storage_arr[ic, yr_idx] = storage
+
+    def _rebuild(arr, long_name, units):
+        return xr.DataArray(
+            arr,
+            dims=[country_dim, "time"],
+            coords=rl_da.coords,
+            attrs={"long_name": long_name, "units": units},
+        ).transpose(*orig_dims)
+
+    ds_out = ds_residual_load.copy()
+    ds_out[rl_var] = _rebuild(
+        rl_arr,
+        "Residual load after reservoir hydro dispatch",
+        ds_residual_load[rl_var].attrs.get("units", "GWh"),
+    )
+    ds_out["reservoir_dispatch_gwh"] = _rebuild(
+        dispatch_arr, "Reservoir hydro dispatch", "GWh per 3h step"
+    )
+    ds_out["reservoir_storage_gwh"] = _rebuild(
+        storage_arr, "Reservoir storage level", "GWh"
     )
     return ds_out
 

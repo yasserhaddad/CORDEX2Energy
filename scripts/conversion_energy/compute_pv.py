@@ -17,14 +17,20 @@ from cordex2energy.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_from_config,
 )
-from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.data_processing.load_data import ClimateModelData, ClimateReanalysisData
 from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     BC_SUBDAILY_CHUNKS,
+    CORDEX_TO_CERRA_VARS,
     EXTENT_BC,
     EXTENT_CH,
 )
-from cordex2energy.utils.utils_xarray import get_nan_mask, sel_extent, match_instaneous_to_mean_values
+from cordex2energy.utils.utils_xarray import (
+    get_nan_mask,
+    get_time_resolution,
+    sel_extent,
+    match_instaneous_to_mean_values,
+)
 from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
 
 os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
@@ -47,6 +53,9 @@ if __name__ == "__main__":
     if args.scope not in ["europe", "ch"]:
         raise ValueError("Scope must be 'europe' or 'ch'")
 
+    is_cerra = args.climate_model_chain.lower() == "cerra"
+    model_tag = "cerra" if is_cerra else f"{args.climate_model_chain}_{args.climate_scenario}"
+
     path_data_processed = Path(paths["path_data_processed"])
     path_data_temporary = Path(paths["path_data_temporary"])
 
@@ -55,21 +64,10 @@ if __name__ == "__main__":
 
     path_energy = path_data_processed / "energy"
 
-    output_path_solar = (
-        path_energy
-        / args.scope
-        / "pv"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-    )
+    output_path_solar = path_energy / args.scope / "pv" / model_tag
     output_path_solar.mkdir(parents=True, exist_ok=True)
 
-    output_path_temp_solar = (
-        path_data_temporary
-        / "energy"
-        / args.scope
-        / "pv"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-    )
+    output_path_temp_solar = path_data_temporary / "energy" / args.scope / "pv" / model_tag
     output_path_temp_solar.mkdir(parents=True, exist_ok=True)
 
     # dask.config.set(num_workers=15, scheduler="processes")
@@ -91,46 +89,82 @@ if __name__ == "__main__":
     spatial_chunks = {"lat": 30, "lon": 30}
 
     if args.scope == "europe":
-        path_tas = (
+        if is_cerra:
+            path_nan_mask = (
+                path_data_processed / "cerra_processed" / "regridded"
+                / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr"
+            )
+            da_nan_mask = get_nan_mask(
+                xr.open_zarr(path_nan_mask, chunks="auto")
+                .sel(time="1991-01-01 00:00")
+                .drop_vars("time")
+                .squeeze(),
+                var_name=CORDEX_TO_CERRA_VARS["tas"],
+                climate_model_chain=args.climate_model_chain,
+            ).chunk({"lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]})
+        else:
+            path_tas = (
+                path_data_processed
+                / "cordex_processed"
+                / f"{args.climate_model_chain}_{args.climate_scenario}"
+                / "regridded"
+                / "3hr"
+                / "tas.zarr"
+            )
+            da_nan_mask = get_nan_mask(
+                xr.open_zarr(path_tas, chunks="auto").sel(time="1991-01-01 00:00").drop_vars("time").squeeze(),
+                var_name="tas",
+                climate_model_chain=args.climate_model_chain,
+            ).drop_vars("height").chunk({"lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]})
+
+    if is_cerra:
+        cerra_reg = path_data_processed / "cerra_processed" / "regridded"
+        ds_rsds_bc = ClimateReanalysisData(
+            cerra_reg / f"{CORDEX_TO_CERRA_VARS['rsds']}.zarr",
+            extent=extent,
+            chunks="auto",
+        )
+        time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
+        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
+        ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
+        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["rsds"]: "rsds"})
+    else:
+        ds_rsds_bc = ClimateModelData(
             path_data_processed
             / "cordex_processed"
             / f"{args.climate_model_chain}_{args.climate_scenario}"
-            / "regridded"
+            / "bias_corrected"
             / "3hr"
-            / "tas.zarr"
+            / "rsds.zarr",
+            extent=extent,
+            chunks="auto",
         )
 
-        da_nan_mask = get_nan_mask(
-            xr.open_zarr(path_tas, chunks="auto").sel(time="1991-01-01 00:00").drop_vars("time").squeeze(),
-            var_name="tas",
-            climate_model_chain=args.climate_model_chain,
-        ).drop_vars("height").chunk({"lat": spatial_chunks["lat"], "lon": spatial_chunks["lon"]})
-
-    ds_rsds_bc = ClimateModelData(
-        path_data_processed
-        / "cordex_processed"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-        / "bias_corrected"
-        / "3hr"
-        / "rsds.zarr",
-        extent=extent,
-        chunks="auto",
-    )
-
-    ds_orog = sel_extent(
-        xr.open_dataset(
-            sorted(
-                (
-                    path_data_processed
-                    / "cordex_processed"
-                    / f"{args.climate_model_chain}_{args.climate_scenario}"
-                    / "regridded"
-                    / "fx"
-                ).glob("*.nc")
+    if is_cerra:
+        # CERRA has its own orography; fall back to first available CORDEX fx file if absent
+        cerra_orog_path = path_data_processed / "cerra_processed" / "regridded" / "orog.zarr"
+        if cerra_orog_path.exists():
+            ds_orog = sel_extent(xr.open_zarr(cerra_orog_path), extent)
+        else:
+            first_model = sorted(
+                (path_data_processed / "cordex_processed").glob("*/regridded/fx/*.nc")
             )[0]
-        ),
-        extent,
-    )
+            ds_orog = sel_extent(xr.open_dataset(first_model), extent)
+    else:
+        ds_orog = sel_extent(
+            xr.open_dataset(
+                sorted(
+                    (
+                        path_data_processed
+                        / "cordex_processed"
+                        / f"{args.climate_model_chain}_{args.climate_scenario}"
+                        / "regridded"
+                        / "fx"
+                    ).glob("*.nc")
+                )[0]
+            ),
+            extent,
+        )
     ds_orog = ds_orog.chunk(spatial_chunks)
     step = 30
     # Determine time slices based on ds_tas_bc time range
@@ -149,50 +183,75 @@ if __name__ == "__main__":
         print(f"Processing data for {start_year}-{end_year}")
         output_path_zarr = (
             output_path_temp_solar
-            / f"pv_{args.climate_model_chain}_{args.climate_scenario}_{start_year}_{end_year}.zarr"
+            / f"pv_{model_tag}_{start_year}_{end_year}.zarr"
         )
 
         output_path_agg = (
             output_path_temp_solar
-            / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_{start_year}_{end_year}.nc"
+            / f"pv_agg_{model_tag}_{start_year}_{end_year}.nc"
         )
 
         if output_path_zarr.exists() and output_path_agg.exists():
             print(f"Output files already exist for {start_year}-{end_year}. Skipping.")
             continue
 
-        ds_rsds_bc = ClimateModelData(
-            path_data_processed
-            / "cordex_processed"
-            / f"{args.climate_model_chain}_{args.climate_scenario}"
-            / "bias_corrected"
-            / "3hr"
-            / "rsds.zarr",
-            extent=extent,
-            chunks="auto",
-        )
+        if is_cerra:
+            cerra_reg = path_data_processed / "cerra_processed" / "regridded"
+            ds_rsds_bc = ClimateReanalysisData(
+                cerra_reg / f"{CORDEX_TO_CERRA_VARS['rsds']}.zarr",
+                extent=extent, chunks="auto",
+            )
+            time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
+            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
+            ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
+            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["rsds"]: "rsds"})
 
-        ds_tas_bc = ClimateModelData(
-            path_data_processed
-            / "cordex_processed"
-            / f"{args.climate_model_chain}_{args.climate_scenario}"
-            / "bias_corrected"
-            / "3hr"
-            / "tas.zarr",
-            extent=extent,
-            chunks="auto",
-        )
+            ds_tas_bc = ClimateReanalysisData(
+                cerra_reg / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr",
+                extent=extent, chunks="auto",
+            )
+            ds_tas_bc.ds_data = ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
 
-        ds_sfcWind_bc = ClimateModelData(
-            path_data_processed
-            / "cordex_processed"
-            / f"{args.climate_model_chain}_{args.climate_scenario}"
-            / "bias_corrected"
-            / "3hr"
-            / "sfcWind.zarr",
-            extent=extent,
-            chunks="auto",
-        )
+            ds_sfcWind_bc = ClimateReanalysisData(
+                cerra_reg / f"{CORDEX_TO_CERRA_VARS['sfcWind']}.zarr",
+                extent=extent, chunks="auto",
+            )
+            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.rename(
+                {CORDEX_TO_CERRA_VARS["sfcWind"]: "sfcWind"}
+            )
+        else:
+            ds_rsds_bc = ClimateModelData(
+                path_data_processed
+                / "cordex_processed"
+                / f"{args.climate_model_chain}_{args.climate_scenario}"
+                / "bias_corrected"
+                / "3hr"
+                / "rsds.zarr",
+                extent=extent,
+                chunks="auto",
+            )
+
+            ds_tas_bc = ClimateModelData(
+                path_data_processed
+                / "cordex_processed"
+                / f"{args.climate_model_chain}_{args.climate_scenario}"
+                / "bias_corrected"
+                / "3hr"
+                / "tas.zarr",
+                extent=extent,
+                chunks="auto",
+            )
+
+            ds_sfcWind_bc = ClimateModelData(
+                path_data_processed
+                / "cordex_processed"
+                / f"{args.climate_model_chain}_{args.climate_scenario}"
+                / "bias_corrected"
+                / "3hr"
+                / "sfcWind.zarr",
+                extent=extent,
+                chunks="auto",
+            )
         time_slice = slice(str(start_year), str(end_year))
         ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=time_slice)
         ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=time_slice)
@@ -324,17 +383,12 @@ if __name__ == "__main__":
     print("Concatenating datasets...")
     with ProgressBar(dt=60):
         ds_pv = xr.open_mfdataset(
-            output_path_temp_solar.glob(
-                f"pv_{args.climate_model_chain}_{args.climate_scenario}_*.zarr"
-            ),
+            output_path_temp_solar.glob(f"pv_{model_tag}_*.zarr"),
             engine="zarr",
             combine="by_coords",
             parallel=True,
         )
-        output_path_zarr = (
-            output_path_solar
-            / f"pv_{args.climate_model_chain}_{args.climate_scenario}.zarr"
-        )
+        output_path_zarr = output_path_solar / f"pv_{model_tag}.zarr"
         ds_pv.to_zarr(
             output_path_zarr,
             mode="w",
@@ -351,16 +405,11 @@ if __name__ == "__main__":
 
         if args.scope == "europe":
             ds_pv_agg = xr.open_mfdataset(
-                output_path_temp_solar.glob(
-                    f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}_*.nc"
-                ),
+                output_path_temp_solar.glob(f"pv_agg_{model_tag}_*.nc"),
                 combine="by_coords",
             )
 
-            output_path_agg = (
-                output_path_solar
-                / f"pv_agg_{args.climate_model_chain}_{args.climate_scenario}.nc"
-            )
+            output_path_agg = output_path_solar / f"pv_agg_{model_tag}.nc"
             ds_pv_agg.compute().to_netcdf(output_path_agg, mode="w")
             del ds_pv_agg
 

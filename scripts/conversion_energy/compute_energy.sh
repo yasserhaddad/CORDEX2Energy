@@ -35,11 +35,26 @@ mkdir -p "logs/${scope}/${model}_${scenario}"
 # echo "Computing wind power for scope ${scope}..."
 # nice -10 python -u compute_wind_power.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/wind_power_${current_date}.log"
 
-echo "Computing PV for scope ${scope}..."
-nice -10 python -u compute_pv.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
+# echo "Computing PV for scope ${scope}..."
+# nice -10 python -u compute_pv.py  "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}_${scenario}/pv_${current_date}.log"
 
 # echo "Computing hydropower..."
 # nice -10 python -u compute_hydropower.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/hydropower_${current_date}.log"
 
 # echo "Computing Demand..."
 # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
+
+# --- CERRA reanalysis baseline ---
+model="cerra"
+scenario="none"
+scope="europe"
+mkdir -p "logs/${scope}/${model}"
+
+echo "Computing wind power for CERRA..."
+nice -10 python -u compute_wind_power.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/wind_power_${current_date}.log"
+
+echo "Computing PV for CERRA..."
+nice -10 python -u compute_pv.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/pv_${current_date}.log"
+
+# echo "Computing demand for CERRA..."
+# nice -10 python -u compute_demand.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/demand_${current_date}.log"

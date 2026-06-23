@@ -32,6 +32,20 @@ EUROPE_TURBINES = ["E-126/7580", "SWT120/3600", "SWT142/3150"]
 CH_TURBINES = ["E-82/2300", "E-92/2350", "V90/2000", "V112/3300"]
 
 
+CORDEX_TO_CERRA_VARS = {
+    "tas":      "2t",
+    "sfcWind":  "10si",
+    "rsds":     "ssrd",
+    "wind100m": "ws",
+    "wind150m": "ws",
+    "pr":       "tp",
+    "hurs":     "2r",
+    "ps":       "sp",
+    "psl":      "msl",
+    "mrro":     "ro",
+    "clt":      "tcc",
+}
+
 IPCC_LINE_CHART_COLOR_PALETTE_HEX = [
     "#808080",  # Grey
     "#5BAEB2",  # Teal

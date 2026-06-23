@@ -26,6 +26,9 @@ import xarray as xr
 
 from cordex2energy.conversion_energy.tyndp import (
     aggregate_by_balancing_zones,
+    apply_battery_dispatch,
+    apply_prosumer_battery_dispatch,
+    apply_reservoir_dispatch,
     build_c2e_name_to_iso2,
     build_thermal_targets,
     build_tyndp_nuts_mapping,
@@ -35,6 +38,7 @@ from cordex2energy.conversion_energy.tyndp import (
     compute_or_load_baseload,
     drop_overlapping_zones,
     load_nuts_geodata,
+    load_tyndp_battery_capacities,
     load_tyndp_country_codes,
     load_tyndp_market_profiles,
     load_tyndp_supply_capacities,
@@ -254,6 +258,15 @@ if __name__ == "__main__":
         help="Target year for the supply capacity scenario.",
     )
     parser.add_argument(
+        "--rolling_window_residual_load",
+        type=int,
+        default=8,
+        help=(
+            "Rolling window size in timesteps for smoothing the residual load. "
+            "Set to 1 or None to disable smoothing."
+        ),
+    )
+    parser.add_argument(
         "--turbine",
         type=str,
         default="E-126/7580",
@@ -274,6 +287,66 @@ if __name__ == "__main__":
         default=15,
         help="Number of Dask workers.",
     )
+    parser.add_argument(
+        "--use_reservoir_hydro",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply optimal reservoir hydro dispatch (Gurobi QP, annual cyclical) "
+            "to the country-level residual load before zonal aggregation. "
+            "Requires a Gurobi licence and reservoir capacity CSVs under "
+            "<path_data_extremes>/reservoir_capacity/."
+        ),
+    )
+    parser.add_argument(
+        "--reservoir_min_storage_fraction",
+        type=float,
+        default=None,
+        help=(
+            "Minimum reservoir storage level as a fraction of maximum capacity "
+            "(e.g. 0.05).  Passed to the Gurobi QP as a lower bound on storage "
+            "at every time step.  Default None (no floor)."
+        ),
+    )
+    parser.add_argument(
+        "--use_batteries",
+        action="store_true",
+        default=False,
+        help="Apply utility battery dispatch (with lookahead) to the country-level residual load.",
+    )
+    parser.add_argument(
+        "--use_prosumer_batteries",
+        action="store_true",
+        default=False,
+        help=(
+            "Also apply PV-aware prosumer battery dispatch before utility dispatch. "
+            "Requires --use_batteries."
+        ),
+    )
+    parser.add_argument(
+        "--battery_duration_h",
+        type=float,
+        default=4.0,
+        help="Battery energy-to-power ratio in hours (default 4).",
+    )
+    parser.add_argument(
+        "--battery_roundtrip_eff",
+        type=float,
+        default=0.85,
+        help="Round-trip efficiency for batteries (default 0.85).",
+    )
+    parser.add_argument(
+        "--battery_initial_soc",
+        type=float,
+        default=0.50,
+        help="Initial state-of-charge as a fraction of capacity (default 0.5).",
+    )
+    parser.add_argument(
+        "--battery_dispatch_lookahead_h",
+        type=float,
+        default=24.0,
+        help="Lookahead window in hours for utility battery discharge rationing (default 24).",
+    )
 
     args = parser.parse_args()
 
@@ -285,6 +358,7 @@ if __name__ == "__main__":
     demand_year = args.demand_year
     supply_scenario = args.supply_scenario
     supply_year = args.supply_year
+    rolling_window_residual_load = args.rolling_window_residual_load
 
     # Map CLI supply scenario to the column suffix used in the TYNDP Excel files.
     _SUPPLY_SCENARIO_MAP = {"LOW": "LOW", "BE": "Best Estimate", "HIGH": "HIGH"}
@@ -328,17 +402,31 @@ if __name__ == "__main__":
     path_c2e = path_data_processed / "c2e" / "outputs"
 
     path_baseload_cache = path_tyndp / "baseload"
-    path_out = path_data_extremes / "residual_load" / f"{climate_model}_{climate_scenario}"
 
-    for p in (path_baseload_cache, path_out):
-        p.mkdir(parents=True, exist_ok=True)
-
-    # File tags for output naming.
+    # Build run tag before path_out so it can be used as the output subfolder.
     _model_tag = model_prefix
     _run_tag = (
         f"{demand_scenario}_{demand_year}"
         f"_{supply_scenario}_{supply_year}"
     )
+    if rolling_window_residual_load and rolling_window_residual_load > 1:
+        _run_tag += f"_rlsmooth_{rolling_window_residual_load}"
+    if args.use_reservoir_hydro:
+        _run_tag += "_reservoirdispatch"
+    if args.use_batteries:
+        _run_tag += "_batteries"
+        if args.use_prosumer_batteries:
+            _run_tag += "_prosumer"
+
+    # Output directory: one subfolder per run configuration.
+    path_out = (
+        path_data_extremes / "residual_load"
+        / f"{climate_model}_{climate_scenario}"
+        / _run_tag
+    )
+
+    for p in (path_baseload_cache, path_out):
+        p.mkdir(parents=True, exist_ok=True)
 
     # ── Load TYNDP supply capacities ──────────────────────────────────────────────
 
@@ -420,6 +508,7 @@ if __name__ == "__main__":
     ds_wind = cordex_data["ds_wind"]
     ds_wind_offshore = cordex_data["ds_wind_offshore"]
     ds_hydro_ror = cordex_data["ds_hydro_ror"]
+    ds_hydro_inflow = cordex_data["ds_hydro_inflow"]
     ds_heating_demand = cordex_data["ds_heating_demand"]
     ds_cooling_demand = cordex_data["ds_cooling_demand"]
 
@@ -490,7 +579,80 @@ if __name__ == "__main__":
         ds_cooling_demand,
         target_twh_per_country=thermal_targets,
         return_generation_demand_components=True,
+        rolling_window_residual_load=rolling_window_residual_load,
     )
+
+    # ── Optional reservoir hydro dispatch ─────────────────────────────────────
+    if args.use_reservoir_hydro:
+        print("\n── Applying reservoir hydro dispatch ────────────────────────────────────────")
+        df_hydro_capacities = pd.read_csv(path_data_extremes / 'hydro_capacities.csv', index_col=0)
+        _ds_reservoir = apply_reservoir_dispatch(
+            ds_residual_load,
+            ds_hydro_inflow,
+            df_hydro_capacities,
+            min_storage_level_fraction=args.reservoir_min_storage_fraction,
+        )
+        # Updated residual load only — reservoir state variables go to components.
+        ds_residual_load = _ds_reservoir.drop_vars(
+            ["reservoir_dispatch_gwh", "reservoir_storage_gwh"]
+        )
+        ds_components = ds_components.assign(
+            reservoir_dispatch_gwh=_ds_reservoir["reservoir_dispatch_gwh"],
+            reservoir_storage_gwh=_ds_reservoir["reservoir_storage_gwh"],
+        )
+        print("  Done.")
+
+    # ── Optional battery dispatch ──────────────────────────────────────────────
+    if args.use_batteries:
+        print("\n── Applying battery dispatch ─────────────────────────────────────────────────")
+        s_batt_prosumer, s_batt_utility = load_tyndp_battery_capacities(
+            path_supply_excel,
+            scenario=supply_scenario_col,
+            year=supply_year,
+            return_separate=True,
+        )
+
+        prosumer_dispatch_gwh = None
+        if args.use_prosumer_batteries:
+            print("  Prosumer batteries (PV-aware, daily cycling) …")
+            _ds_pro = apply_prosumer_battery_dispatch(
+                ds_residual_load,
+                ds_components["gen_pv"],
+                s_batt_prosumer,
+                battery_duration_h=args.battery_duration_h,
+                roundtrip_efficiency=args.battery_roundtrip_eff,
+                initial_soc_fraction=args.battery_initial_soc,
+                zone_dim="country",
+            )
+            prosumer_dispatch_gwh = _ds_pro["battery_dispatch_gwh"]
+            ds_residual_load = _ds_pro.assign(
+                residual_load=_ds_pro["residual_load_with_batteries"]
+            ).drop_vars(["residual_load_with_batteries", "soc_gwh", "battery_dispatch_gwh"])
+            ds_components = ds_components.assign(prosumer_dispatch_gwh=prosumer_dispatch_gwh)
+
+        print(f"  Utility batteries (lookahead={args.battery_dispatch_lookahead_h:.0f} h) …")
+        _ds_util = apply_battery_dispatch(
+            ds_residual_load,
+            s_batt_utility,
+            battery_duration_h=args.battery_duration_h,
+            roundtrip_efficiency=args.battery_roundtrip_eff,
+            initial_soc_fraction=args.battery_initial_soc,
+            dispatch_lookahead_h=args.battery_dispatch_lookahead_h,
+            zone_dim="country",
+        )
+        utility_dispatch_gwh = _ds_util["battery_dispatch_gwh"]
+        ds_residual_load = _ds_util.assign(
+            residual_load=_ds_util["residual_load_with_batteries"]
+        ).drop_vars(["residual_load_with_batteries", "soc_gwh", "battery_dispatch_gwh"])
+        ds_components = ds_components.assign(utility_dispatch_gwh=utility_dispatch_gwh)
+
+        battery_dispatch_gwh = (
+            prosumer_dispatch_gwh + utility_dispatch_gwh
+            if prosumer_dispatch_gwh is not None
+            else utility_dispatch_gwh
+        )
+        ds_components = ds_components.assign(battery_dispatch_gwh=battery_dispatch_gwh)
+        print("  Done.")
 
     # Aggregate from individual countries to real-time balancing zones.
     ds_residual_load_zonal = aggregate_by_balancing_zones(ds_residual_load)
@@ -509,12 +671,21 @@ if __name__ == "__main__":
         "supply_scenario": supply_scenario_col,
         "supply_year": supply_year,
         "turbine": args.turbine,
+        "rolling_window_residual_load": rolling_window_residual_load,
+        "use_reservoir_hydro": str(args.use_reservoir_hydro),
+        "reservoir_min_storage_fraction": args.reservoir_min_storage_fraction,
+        "use_batteries": str(args.use_batteries),
+        "use_prosumer_batteries": str(args.use_prosumer_batteries),
+        "battery_duration_h": args.battery_duration_h,
+        "battery_roundtrip_eff": args.battery_roundtrip_eff,
+        "battery_initial_soc": args.battery_initial_soc,
+        "battery_dispatch_lookahead_h": args.battery_dispatch_lookahead_h,
     }
 
-    path_rl = path_out / f"residual_load_{_run_tag}.nc"
-    path_rl_zonal = path_out / f"residual_load_zonal_{_run_tag}.nc"
-    path_comp = path_out / f"components_{_run_tag}.nc"
-    path_comp_zonal = path_out / f"components_zonal_{_run_tag}.nc"
+    path_rl = path_out / "residual_load.nc"
+    path_rl_zonal = path_out / "residual_load_zonal.nc"
+    path_comp = path_out / "components.nc"
+    path_comp_zonal = path_out / "components_zonal.nc"
 
     for ds, path in [
         (ds_residual_load, path_rl),
@@ -523,6 +694,8 @@ if __name__ == "__main__":
         (ds_components_zonal, path_comp_zonal),
     ]:
         ds.attrs.update(_attrs)
+        if path.exists():
+            path.unlink()
         ds.to_netcdf(path)
         print(f"  Saved: {path}")
 

@@ -19,8 +19,13 @@ from cordex2energy.conversion_energy.demand import (
     normalize_population_data,
     compute_cdd_hdd_xr,
 )
-from cordex2energy.data_processing.load_data import ClimateModelData
-from cordex2energy.utils.constants import COMPRESSED_ZARR_ENCODING, BC_SUBDAILY_CHUNKS, EXTENT_BC
+from cordex2energy.data_processing.load_data import ClimateModelData, ClimateReanalysisData
+from cordex2energy.utils.constants import (
+    COMPRESSED_ZARR_ENCODING,
+    BC_SUBDAILY_CHUNKS,
+    CORDEX_TO_CERRA_VARS,
+    EXTENT_BC,
+)
 from cordex2energy.utils.utils_xarray import sel_extent
 
 import os
@@ -52,14 +57,10 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def setup_tmp_directories(paths, climate_model_chain, climate_scenario):
+def setup_tmp_directories(paths, model_tag):
     path_data_temporary = Path(paths["path_data_temporary"])
     tmp_energy_data_dir = (
-        path_data_temporary
-        / "energy"
-        / "europe"
-        / "demand"
-        / f"{climate_model_chain}_{climate_scenario}"
+        path_data_temporary / "energy" / "europe" / "demand" / model_tag
     )
     tmp_energy_data_dir.mkdir(parents=True, exist_ok=True)
     return tmp_energy_data_dir
@@ -68,6 +69,8 @@ def setup_tmp_directories(paths, climate_model_chain, climate_scenario):
 def load_and_process_data(
     paths, climate_model_chain, climate_scenario, chunks_bc, population_weighted=False
 ):
+    is_cerra = climate_model_chain.lower() == "cerra"
+
     extent_pop = {
         "lat_min": EXTENT_BC["lat_min"] - 1,
         "lat_max": EXTENT_BC["lat_max"] + 1,
@@ -75,16 +78,26 @@ def load_and_process_data(
         "lon_max": EXTENT_BC["lon_max"] + 1,
     }
 
-    ds_tas_bc = ClimateModelData(
-        Path(paths["path_data_processed"])
-        / "cordex_processed"
-        / f"{climate_model_chain}_{climate_scenario}"
-        / "bias_corrected"
-        / "3hr"
-        / "tas.zarr",
-        extent=EXTENT_BC,
-        chunks=chunks_bc,
-    )
+    if is_cerra:
+        path_tas = (
+            Path(paths["path_data_processed"])
+            / "cerra_processed"
+            / "regridded"
+            / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr"
+        )
+        ds_tas_bc = ClimateReanalysisData(path_tas, extent=EXTENT_BC, chunks=chunks_bc)
+        ds_tas_bc.ds_data = ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
+    else:
+        ds_tas_bc = ClimateModelData(
+            Path(paths["path_data_processed"])
+            / "cordex_processed"
+            / f"{climate_model_chain}_{climate_scenario}"
+            / "bias_corrected"
+            / "3hr"
+            / "tas.zarr",
+            extent=EXTENT_BC,
+            chunks=chunks_bc,
+        )
 
     da_worldpop_coarse = process_population_data(
         sel_extent(
@@ -177,7 +190,7 @@ def process_splits(
 
 
 def concatenate_and_save_datasets(
-    tmp_energy_data_dir, path_energy, climate_model_chain, climate_scenario, chunks_bc
+    tmp_energy_data_dir, path_energy, model_tag, chunks_bc
 ):
     print("Concatenating datasets...")
     ds_demand = xr.open_mfdataset(
@@ -195,12 +208,7 @@ def concatenate_and_save_datasets(
         }
         for var in ds_demand.data_vars
     }
-    output_path = (
-        path_energy
-        / "europe"
-        / "demand"
-        / f"{climate_model_chain}_{climate_scenario}.zarr"
-    )
+    output_path = path_energy / "europe" / "demand" / f"{model_tag}.zarr"
     output_path.mkdir(parents=True, exist_ok=True)
 
     ds_demand.chunk(chunks_bc).to_zarr(
@@ -214,9 +222,13 @@ def main():
     args = parse_arguments()
     paths = json.load(open(args.paths_file))
 
-    tmp_energy_data_dir = setup_tmp_directories(
-        paths, args.climate_model_chain, args.climate_scenario
+    model_tag = (
+        "cerra"
+        if args.climate_model_chain.lower() == "cerra"
+        else f"{args.climate_model_chain}_{args.climate_scenario}"
     )
+
+    tmp_energy_data_dir = setup_tmp_directories(paths, model_tag)
 
     time_start_script = time.time()
 
@@ -242,8 +254,7 @@ def main():
     concatenate_and_save_datasets(
         tmp_energy_data_dir,
         path_energy,
-        args.climate_model_chain,
-        args.climate_scenario,
+        model_tag,
         BC_SUBDAILY_CHUNKS,
     )
 

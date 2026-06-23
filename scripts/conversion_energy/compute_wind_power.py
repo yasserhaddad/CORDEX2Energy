@@ -21,10 +21,12 @@ from cordex2energy.conversion_energy.wind import (
     compute_wind_power,
     extrapolate_wind_speed,
 )
-from cordex2energy.data_processing.load_data import ClimateModelData
+from cordex2energy.data_processing.load_data import ClimateModelData, ClimateReanalysisData
 from cordex2energy.utils.constants import (
+    REGRIDDED_CHUNKS,
     BC_SUBDAILY_CHUNKS,
     COMPRESSED_ZARR_ENCODING,
+    CORDEX_TO_CERRA_VARS,
     EXTENT_BC,
     EXTENT_CH,
 )
@@ -69,6 +71,9 @@ def main():
     hub_heights = EUROPE_HUB_HEIGHTS if args.scope == "europe" else CH_HUB_HEIGHTS
     extent = EXTENT_BC if args.scope == "europe" else EXTENT_CH
 
+    is_cerra = args.climate_model_chain.lower() == "cerra"
+    model_tag = "cerra" if is_cerra else f"{args.climate_model_chain}_{args.climate_scenario}"
+
     time_start = time.time()
     print("Computing smoothed power curves...")
     power_curves_smoothed = {
@@ -77,93 +82,112 @@ def main():
 
     print("Loading wind data...")
 
-    path_tas = (
-        path_data_processed
-        / "cordex_processed"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-        / "regridded"
-        / "3hr"
-        / "tas.zarr"
-    )
-
-    da_nan_mask = (
-        get_nan_mask(
-            xr.open_zarr(path_tas, chunks="auto")
-            .sel(time="1991-01-01 00:00")
-            .drop_vars("time")
-            .squeeze(),
-            var_name="tas",
-            climate_model_chain=args.climate_model_chain,
+    if is_cerra:
+        path_nan_mask = path_data_processed / "cerra_processed" / "regridded" / "2t.zarr"
+        da_nan_mask = (
+            get_nan_mask(
+                xr.open_zarr(path_nan_mask, chunks="auto")
+                .sel(time="1991-01-01 00:00")
+                .drop_vars("time")
+                .squeeze(),
+                var_name=CORDEX_TO_CERRA_VARS["tas"],
+                climate_model_chain=args.climate_model_chain,
+            )
+            .chunk({"lat": REGRIDDED_CHUNKS["lat"], "lon": REGRIDDED_CHUNKS["lon"]})
         )
-        .drop_vars("height")
-        .chunk({"lat": BC_SUBDAILY_CHUNKS["lat"], "lon": BC_SUBDAILY_CHUNKS["lon"]})
-    )
-
-    path_wind_100m = (
-        path_data_processed
-        / "cordex_processed"
-        / f"{args.climate_model_chain}_{args.climate_scenario}"
-        / "bias_corrected"
-        / "3hr"
-        / "wind100m.zarr"
-    )
-
-    if path_wind_100m.exists():
         heights = [100, 150]
-        ds_wind = ClimateModelData(
-            path_wind_100m,
-            extent=extent,
-            chunks=BC_SUBDAILY_CHUNKS,
+        path_ws = (
+            path_data_processed / "cerra_processed" / "regridded"
+            / f"{CORDEX_TO_CERRA_VARS['wind100m']}.zarr"
         )
-
-        ds_wind_150m = ClimateModelData(
-            path_wind_100m.parent / "wind150m.zarr",
-            extent=extent,
-            chunks=BC_SUBDAILY_CHUNKS,
-        )
-
+        ds_wind = ClimateReanalysisData(path_ws, extent=extent, chunks=REGRIDDED_CHUNKS)
         print("Computing wind speed exponent...")
         da_alpha = compute_power_law_exponent(
-            ds_wind.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
+            ds_wind.ds_data.ws.sel(height=100), ds_wind.ds_data.ws.sel(height=150), 100, 150
         )
         with ProgressBar(dt=60):
             da_alpha = da_alpha.compute() if args.scope == "ch" else da_alpha.persist()
-
+        ds_wind.ds_data["wind100m"] = ds_wind.ds_data.ws.sel(height=100).drop_vars("height")
+        wind_var = "wind100m"
     else:
-        # fallback to CERRA-derived alpha and surface wind
-        heights = [10, 100]
-        da_alpha = sel_extent(
-            xr.open_dataset(
-                path_data_processed
-                / "cerra_processed"
-                / "alpha"
-                / f"da_alpha_cerra_median_heights_{heights[0]}_{heights[1]}.nc"
-            ).alpha,
-            extent=extent,
+        path_tas = (
+            path_data_processed
+            / "cordex_processed"
+            / f"{args.climate_model_chain}_{args.climate_scenario}"
+            / "regridded"
+            / "3hr"
+            / "tas.zarr"
         )
-        ds_wind = ClimateModelData(
-            path_wind_100m.parent / "sfcWind.zarr",
-            extent=extent,
-            chunks=BC_SUBDAILY_CHUNKS,
-        )
-
-        da_alpha = (
-            da_alpha.isel(
-                time=(np.arange(len(ds_wind.ds_data.time)) % len(da_alpha.time))
+        da_nan_mask = (
+            get_nan_mask(
+                xr.open_zarr(path_tas, chunks="auto")
+                .sel(time="1991-01-01 00:00")
+                .drop_vars("time")
+                .squeeze(),
+                var_name="tas",
+                climate_model_chain=args.climate_model_chain,
             )
-            .assign_coords(time=ds_wind.ds_data.time)
-            .chunk(BC_SUBDAILY_CHUNKS)
+            .drop_vars("height")
+            .chunk({"lat": BC_SUBDAILY_CHUNKS["lat"], "lon": BC_SUBDAILY_CHUNKS["lon"]})
         )
 
-    wind_var = list(ds_wind.ds_data.data_vars.keys())[0]
+        path_wind_100m = (
+            path_data_processed
+            / "cordex_processed"
+            / f"{args.climate_model_chain}_{args.climate_scenario}"
+            / "bias_corrected"
+            / "3hr"
+            / "wind100m.zarr"
+        )
+
+        if path_wind_100m.exists():
+            heights = [100, 150]
+            ds_wind = ClimateModelData(
+                path_wind_100m,
+                extent=extent,
+                chunks=BC_SUBDAILY_CHUNKS,
+            )
+            ds_wind_150m = ClimateModelData(
+                path_wind_100m.parent / "wind150m.zarr",
+                extent=extent,
+                chunks=BC_SUBDAILY_CHUNKS,
+            )
+            print("Computing wind speed exponent...")
+            da_alpha = compute_power_law_exponent(
+                ds_wind.ds_data.wind100m, ds_wind_150m.ds_data.wind150m, 100, 150
+            )
+            with ProgressBar(dt=60):
+                da_alpha = da_alpha.compute() if args.scope == "ch" else da_alpha.persist()
+        else:
+            # fallback to CERRA-derived alpha and surface wind
+            heights = [10, 100]
+            da_alpha = sel_extent(
+                xr.open_dataset(
+                    path_data_processed
+                    / "cerra_processed"
+                    / "alpha"
+                    / f"da_alpha_cerra_median_heights_{heights[0]}_{heights[1]}.nc"
+                ).alpha,
+                extent=extent,
+            )
+            ds_wind = ClimateModelData(
+                path_wind_100m.parent / "sfcWind.zarr",
+                extent=extent,
+                chunks=BC_SUBDAILY_CHUNKS,
+            )
+            da_alpha = (
+                da_alpha.isel(
+                    time=(np.arange(len(ds_wind.ds_data.time)) % len(da_alpha.time))
+                )
+                .assign_coords(time=ds_wind.ds_data.time)
+                .chunk(BC_SUBDAILY_CHUNKS)
+            )
+
+        wind_var = list(ds_wind.ds_data.data_vars.keys())[0]
 
     # Europe: compute and save per-turbine zarrs then aggregate per-country
     if args.scope == "europe":
-        output_path_wind = (
-            output_path_root
-            / "wind_power"
-            / f"{args.climate_model_chain}_{args.climate_scenario}"
-        )
+        output_path_wind = output_path_root / "wind_power" / model_tag
         output_path_wind.mkdir(parents=True, exist_ok=True)
 
         for turbine_type in turbines:
@@ -207,7 +231,7 @@ def main():
                 }
                 output_path_zarr = (
                     output_path_wind
-                    / f"wind_power_{args.climate_model_chain}_{args.climate_scenario}_{turbine_type.replace('/', '_')}.zarr"
+                    / f"wind_power_{model_tag}_{turbine_type.replace('/', '_')}.zarr"
                 )
                 ds_wind_power.chunk(BC_SUBDAILY_CHUNKS).to_zarr(
                     output_path_zarr, mode="w", encoding=zarr_encoding
@@ -260,7 +284,7 @@ def main():
 
             output_path_agg = (
                 output_path_wind
-                / f"wind_power_agg_{args.climate_model_chain}_{args.climate_scenario}_{turbine_type.replace('/', '_')}.nc"
+                / f"wind_power_agg_{model_tag}_{turbine_type.replace('/', '_')}.nc"
             )
             if output_path_agg.exists():
                 output_path_agg.unlink()
@@ -268,7 +292,7 @@ def main():
 
             output_path_offshore = (
                 output_path_wind
-                / f"wind_power_offshore_{args.climate_model_chain}_{args.climate_scenario}_{turbine_type.replace('/', '_')}.nc"
+                / f"wind_power_offshore_{model_tag}_{turbine_type.replace('/', '_')}.nc"
             )
             if output_path_offshore.exists():
                 output_path_offshore.unlink()
@@ -333,7 +357,7 @@ def main():
         output_path = (
             output_path_root
             / "wind_power"
-            / f"wind_power_{args.climate_model_chain}_{args.climate_scenario}.zarr"
+            / f"wind_power_{model_tag}.zarr"
         )
         (output_path.parent).mkdir(parents=True, exist_ok=True)
         ds_wind_power.to_zarr(output_path, mode="w", encoding=zarr_encoding)
