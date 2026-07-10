@@ -33,6 +33,7 @@ from cordex2energy.conversion_energy.tyndp import (
     drop_overlapping_zones,
     load_nuts_geodata,
 )
+from cordex2energy.utils.utils_xarray import sanitize_netcdf_attrs
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
@@ -98,7 +99,7 @@ def _aggregate_and_save(
     extra_attrs: dict | None = None,
 ) -> None:
     """Aggregate *ds* over TYNDP zones and write a NetCDF file."""
-    with ProgressBar(dt=30):
+    with ProgressBar(dt=20):
         ds_agg = aggregate_data_per_bidding_zone(ds, gdf_zones, method=method).compute()
 
     if extra_attrs:
@@ -107,7 +108,7 @@ def _aggregate_and_save(
 
     if output_path.exists():
         output_path.unlink()
-    ds_agg.to_netcdf(output_path, mode="w")
+    sanitize_netcdf_attrs(ds_agg).to_netcdf(output_path, mode="w")
     print(f"    → {output_path}")
 
 
@@ -158,7 +159,9 @@ def main():
     paths = json.load(open(args.paths_file))
     path_data_processed = Path(paths["path_data_processed"])
     path_energy_europe = path_data_processed / "energy" / "europe"
-    model_tag = f"{args.climate_model_chain}_{args.climate_scenario}"
+
+    is_cerra = args.climate_model_chain.lower() == "cerra"
+    model_tag = "cerra" if is_cerra else f"{args.climate_model_chain}_{args.climate_scenario}"
 
     dask.config.set(num_workers=15, threads_per_worker=16)
     dask.config.set(
@@ -184,7 +187,7 @@ def main():
         "aggregation_method": args.method,
         "spatial_domain": "TYNDP 2024 bidding zones",
         "climate_model_chain": args.climate_model_chain,
-        "climate_scenario": args.climate_scenario,
+        "climate_scenario": "reanalysis" if is_cerra else args.climate_scenario,
     }
 
     # ------------------------------------------------------------------

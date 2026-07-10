@@ -1803,6 +1803,165 @@ def compute_or_load_baseload(
     return ds_baseload_typical
 
 
+def _optimize_battery_gurobi(
+    residual_load: np.ndarray,
+    E_max: float,
+    P_max: float,
+    one_way_eff: float,
+    min_soc_fraction: float | None = None,
+    charge_mask: np.ndarray | None = None,
+    cycle_steps: int | None = None,
+    initial_soc: float | None = None,
+    env=None,
+    max_signfix_passes: int = 4,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Solve a battery dispatch QP for one horizon using Gurobi.
+
+    Mirrors :func:`_optimize_reservoir_gurobi` but models a **bidirectional**
+    store with round-trip losses.  Minimises ``Σ net_load[t]²`` where
+    ``net_load = residual_load + charge − discharge`` subject to a
+    state-of-charge balance, charge/discharge power bounds, storage bounds, and
+    a boundary condition on storage (see below).
+
+    Complementarity
+    ---------------
+    The objective depends only on ``charge − discharge``, so the two variables are
+    individually degenerate: inflating both lowers the SOC
+    (``η·charge − discharge/η``) **without changing the net load**.  That is a free
+    energy-disposal valve — the battery could absorb surplus, discard it, and absorb
+    again, never filling up.  Round-trip losses do *not* prevent this here, because
+    ``Σ net_load²`` penalises surplus (negative residual load) and therefore *rewards*
+    disposal.  (The familiar "losses make simultaneous charge/discharge dominated"
+    result applies to cost/arbitrage objectives that are monotone in energy consumed.)
+
+    Left unconstrained the relaxation is strongly optimistic: it will flatten a
+    pure-surplus year to zero using a battery of arbitrarily small energy capacity.
+    We therefore enforce ``charge[t] · discharge[t] == 0`` by **sign-fixing**: solve
+    the relaxation, clamp each step to charge-only or discharge-only according to the
+    sign of ``charge − discharge``, and re-solve until the sign pattern is stable.
+    Each pass is a plain convex QP (no binaries).  The clamped problem is strictly
+    more constrained than the relaxation, so the result is always *conservative*
+    (it can never overstate the battery's benefit) and is always feasible (the
+    do-nothing solution satisfies every clamp).
+
+    Parameters
+    ----------
+    residual_load :
+        Residual load over the horizon (GWh per 3h step).  Must be finite.
+    E_max :
+        Battery energy capacity (GWh).
+    P_max :
+        Maximum charge/discharge per 3h step (GWh = installed GW × 3).
+    one_way_eff :
+        One-way efficiency (``sqrt(roundtrip_efficiency)``); applied on charge
+        and on discharge.
+    min_soc_fraction :
+        If set, SOC cannot drop below ``min_soc_fraction × E_max`` at any step.
+    charge_mask :
+        Optional boolean array (length T).  Where ``False``, charging is forbidden
+        (upper bound 0) — used to keep prosumer charging to PV-surplus hours.
+    cycle_steps :
+        Storage boundary condition when ``initial_soc`` is ``None``.  If ``None``,
+        a single cyclicity constraint ``E[0] == E[T]`` is imposed (perfect
+        foresight over the horizon).  If set (e.g. ``8`` for 24 h at 3-hourly
+        resolution), the SOC is forced equal at every multiple of ``cycle_steps``
+        — daily cycling with no cross-day energy shifting.  Ignored when
+        ``initial_soc`` is given.
+    initial_soc :
+        If set, fix ``E[0] == initial_soc`` and impose **no** cyclicity (open
+        horizon; terminal SOC is free).  Used by the rolling day-ahead scheduler,
+        which seeds each window with the SOC carried from the previous window.
+    env :
+        Optional pre-started Gurobi ``Env`` to reuse across many solves (avoids
+        per-call licence/startup cost).  If ``None``, a local env is created and
+        disposed within the call.
+    max_signfix_passes :
+        Maximum number of sign-fixing re-solves used to enforce
+        ``charge · discharge == 0`` (see *Complementarity* above).  The pattern is
+        typically stable after 2-3 passes.
+
+    Returns
+    -------
+    (dispatch, net_load, soc) arrays of length T, or (None, None, None) if Gurobi
+    does not find an optimal solution.  ``dispatch = discharge − charge``
+    (positive = discharging, reduces residual load).  ``soc[k]`` is the storage
+    level entering step ``k`` (i.e. ``E[:-1]``).
+    """
+    import gurobipy as gp
+    from gurobipy import GRB
+
+    T = len(residual_load)
+    E_min = E_max * min_soc_fraction if min_soc_fraction is not None else 0.0
+
+    # Charging is forbidden wherever charge_mask is False (e.g. prosumer PV hours).
+    charge_ub = np.full(T, P_max, dtype=float)
+    if charge_mask is not None:
+        charge_ub = np.where(charge_mask, P_max, 0.0)
+
+    _owns_env = env is None
+    if _owns_env:
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.setParam("LogFile", "")
+        env.start()
+
+    try:
+        m = gp.Model("Battery_Dispatch", env=env)
+
+        E = m.addMVar(shape=T + 1, lb=E_min, ub=E_max, name="E")
+        c = m.addMVar(shape=T, lb=0.0, ub=charge_ub, name="charge")
+        d = m.addMVar(shape=T, lb=0.0, ub=P_max, name="discharge")
+        net_load = m.addMVar(shape=T, lb=-GRB.INFINITY, name="net_load")
+
+        m.addConstr(E[1:] == E[:-1] + one_way_eff * c - d / one_way_eff, name="SOC_Balance")
+        m.addConstr(net_load == residual_load + c - d, name="Net_Load_Def")
+
+        if initial_soc is not None:
+            # Open-horizon window: fixed start SOC, free terminal SOC (no cyclicity).
+            m.addConstr(E[0] == initial_soc, name="Initial_SOC")
+        elif cycle_steps is None:
+            m.addConstr(E[0] == E[T], name="Cyclicity")
+        else:
+            # Force the SOC equal at every cycle boundary (e.g. each midnight), so no
+            # energy is shifted across cycles.  Includes E[0] == E[T].
+            bnds = np.arange(0, T + 1, cycle_steps)
+            if bnds[-1] != T:
+                bnds = np.append(bnds, T)
+            m.addConstr(E[bnds[:-1]] == E[bnds[1:]], name="Cyclicity")
+
+        m.setObjective(net_load @ net_load, GRB.MINIMIZE)
+        m.optimize()
+        if m.Status != GRB.OPTIMAL:
+            return None, None, None
+
+        # ── Sign-fixing: enforce charge[t] * discharge[t] == 0 ────────────────
+        # The relaxation above is degenerate in (c, d) and exploits it: inflating
+        # both drains the SOC without changing net load, letting the battery absorb
+        # surplus it never returns.  Clamp each step to the direction the relaxation
+        # chose and re-solve; after the first clamped solve a step's charge and
+        # discharge bounds are never both > 0, so complementarity holds by
+        # construction.  Further passes only refine which steps may act.
+        _TOL = 1e-9
+        cur_cub, cur_dub = charge_ub, np.full(T, P_max, dtype=float)
+        for _ in range(max_signfix_passes):
+            net = c.X - d.X
+            new_cub = np.where(net > _TOL, charge_ub, 0.0)
+            new_dub = np.where(net < -_TOL, P_max, 0.0)
+            if np.array_equal(new_cub, cur_cub) and np.array_equal(new_dub, cur_dub):
+                break  # sign pattern stable
+            cur_cub, cur_dub = new_cub, new_dub
+            c.UB = cur_cub
+            d.UB = cur_dub
+            m.optimize()
+            if m.Status != GRB.OPTIMAL:
+                return None, None, None
+
+        return d.X - c.X, net_load.X, E.X[:-1]
+    finally:
+        if _owns_env:
+            env.dispose()
+
+
 def apply_battery_dispatch(
     ds_residual_zonal: xr.Dataset,
     da_capacity_gwh: xr.DataArray | pd.Series,
@@ -1812,6 +1971,10 @@ def apply_battery_dispatch(
     dispatch_lookahead_h: float = 0.0,
     zone_dim: str = "zone",
     rl_var: str = "residual_load",
+    method: str = "heuristic",
+    min_soc_fraction: float | None = None,
+    commit_h: float = 24.0,
+    verbose: bool = True,
 ) -> xr.Dataset:
     """Apply battery dispatch zone-by-zone to reduce residual load extremes.
 
@@ -1848,6 +2011,34 @@ def apply_battery_dispatch(
         Name of the zone coordinate in ``ds_residual_zonal``.
     rl_var : str
         Name of the residual-load variable.
+    method : str
+        One of ``"heuristic"``, ``"optimal"``, ``"annual"``; anything else raises
+        ``ValueError``.
+
+        - ``"heuristic"`` (default): the greedy charge / lookahead-rationed
+          discharge loop described above.
+        - ``"optimal"``: a **rolling day-ahead** QP scheduler (via Gurobi).  For each
+          ``commit_h`` window it solves a QP over ``commit_h + dispatch_lookahead_h``
+          hours minimising Σ(net residual load)² under an SOC balance and
+          power/energy bounds, commits only the first ``commit_h`` and carries the
+          resulting SOC forward.  Models merchant day-ahead scheduling with limited
+          foresight.
+        - ``"annual"``: a **perfect-foresight annual-cyclical** QP, one solve per
+          zone and calendar year with ``E[0] == E[T]`` — the same objective and
+          horizon as :func:`apply_reservoir_dispatch`.  Use this to dispatch storage
+          for net-load-event mitigation under a scheme consistent with the reservoir.
+          ``initial_soc_fraction``, ``dispatch_lookahead_h`` and ``commit_h`` are
+          unused in this mode.
+    min_soc_fraction : float or None
+        Only used when ``method`` is ``"optimal"`` or ``"annual"``.  Lower bound on
+        SOC as a fraction of capacity at every step.  ``None`` = no floor.
+    commit_h : float
+        Only used when ``method="optimal"``.  Length in hours of the committed
+        (kept) portion of each rolling solve, and the amount the window slides each
+        iteration.  ``dispatch_lookahead_h`` sets the extra foresight beyond it that
+        is solved but discarded.
+    verbose : bool
+        If ``True``, print progress messages.
 
     Returns
     -------
@@ -1874,6 +2065,12 @@ def apply_battery_dispatch(
             dtype=float,
         )
 
+    _VALID_METHODS = ("heuristic", "optimal", "annual")
+    if method not in _VALID_METHODS:
+        raise ValueError(
+            f"Unknown battery dispatch method {method!r}; expected one of {_VALID_METHODS}."
+        )
+
     # Transpose to (zone, time) for the inner loop
     rl_da = ds_residual_zonal[rl_var].transpose(zone_dim, "time")
     rl_arr = rl_da.values.copy()
@@ -1881,34 +2078,134 @@ def apply_battery_dispatch(
     rl_new = rl_arr.copy()
     soc_arr = np.zeros_like(rl_arr)
 
-    for iz in range(n_zones):
-        cap = cap_by_zone[iz]
-        if cap <= 0.0:
-            continue
+    if method == "annual":
+        # Annual-cyclical perfect-foresight QP, one solve per zone and calendar year.
+        # Identical objective/horizon to apply_reservoir_dispatch: minimise the sum of
+        # squared net residual load with E[0] == E[T] (passing initial_soc=None and
+        # cycle_steps=None selects that cyclicity), so `initial_soc_fraction` is unused
+        # here — the starting SOC is free and determined by the cyclicity constraint.
+        import gurobipy as gp
 
-        max_pwr = cap / battery_duration_h * 3.0  # GWh per 3h step
-        soc = cap * initial_soc_fraction
+        time_index = pd.DatetimeIndex(rl_da["time"].values)
 
-        for t in range(n_time):
-            rl_t = rl_arr[iz, t]
-            if np.isnan(rl_t):
-                soc_arr[iz, t] = soc
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.setParam("LogFile", "")
+        env.start()
+        try:
+            for iz in range(n_zones):
+                cap = cap_by_zone[iz]
+                if cap <= 0.0:
+                    continue
+                max_pwr = cap / battery_duration_h * 3.0  # GWh per 3h step
+                for year in np.unique(time_index.year):
+                    year_mask = time_index.year == year
+                    rl_year = rl_arr[iz, year_mask]
+                    if np.all(np.isnan(rl_year)):
+                        continue
+                    # Gurobi needs finite inputs; treat NaN steps as zero residual load,
+                    # then restore NaNs in the adjusted series.
+                    nan_mask = np.isnan(rl_year)
+                    rl_solve = np.where(nan_mask, 0.0, rl_year)
+                    _, net_load, soc = _optimize_battery_gurobi(
+                        rl_solve, cap, max_pwr, one_way_eff,
+                        min_soc_fraction=min_soc_fraction,
+                        env=env,
+                    )
+                    if net_load is None:
+                        if verbose:
+                            print(f"    {zones[iz]} {year}: Gurobi infeasible, skipping")
+                        continue
+                    idx = np.where(year_mask)[0]
+                    rl_new[iz, idx] = np.where(nan_mask, np.nan, net_load)
+                    soc_arr[iz, idx] = soc
+                if verbose:
+                    print(f"  Zone {zones[iz]}: dispatched {cap:.2f} GWh battery (annual QP)")
+        finally:
+            env.dispose()
+    elif method == "optimal":
+        # Rolling day-ahead QP scheduler.  Each solve covers commit + lookahead
+        # hours, only the first `commit_h` is committed, then the window slides
+        # forward by `commit_h` carrying the resulting SOC.  Committing before the
+        # window end pushes the free-terminal "dump" into the discarded lookahead
+        # tail.  The SOC runs continuously across the whole series (no annual reset).
+        import gurobipy as gp
+
+        commit_steps = max(1, round(commit_h / 3.0))
+        lookahead_steps = max(0, round(dispatch_lookahead_h / 3.0))
+        window_steps = commit_steps + lookahead_steps
+
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.setParam("LogFile", "")
+        env.start()
+        try:
+            for iz in range(n_zones):
+                cap = cap_by_zone[iz]
+                if cap <= 0.0:
+                    continue
+                max_pwr = cap / battery_duration_h * 3.0  # GWh per 3h step
+                soc0 = cap * initial_soc_fraction
+                for start in range(0, n_time, commit_steps):
+                    rl_win = rl_arr[iz, start : start + window_steps]
+                    if np.all(np.isnan(rl_win)):
+                        continue  # nothing to commit; carry SOC unchanged
+                    # Gurobi needs finite inputs; treat NaN steps as zero residual
+                    # load, then restore NaNs in the committed adjusted series.
+                    nan_mask = np.isnan(rl_win)
+                    rl_solve = np.where(nan_mask, 0.0, rl_win)
+                    _, net_load, soc = _optimize_battery_gurobi(
+                        rl_solve, cap, max_pwr, one_way_eff,
+                        min_soc_fraction=min_soc_fraction,
+                        initial_soc=soc0,
+                        env=env,
+                    )
+                    if net_load is None:
+                        continue
+                    commit = min(commit_steps, len(rl_win))
+                    idx = slice(start, start + commit)
+                    rl_new[iz, idx] = np.where(nan_mask[:commit], np.nan, net_load[:commit])
+                    soc_arr[iz, idx] = soc[:commit]
+                    # soc[k] = storage entering step k; soc[commit] is the level at
+                    # the end of the committed window → seed the next window.
+                    if commit < len(soc):
+                        soc0 = soc[commit]
+                if verbose:
+                    print(f"  Zone {zones[iz]}: dispatched {cap:.2f} GWh battery")
+        finally:
+            env.dispose()
+    else:
+        for iz in range(n_zones):
+            cap = cap_by_zone[iz]
+            if cap <= 0.0:
                 continue
-            if rl_t < 0.0:  # surplus → charge greedily
-                charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
-                soc += charge * one_way_eff
-                rl_new[iz, t] = rl_t + charge
-            elif rl_t > 0.0:  # deficit → discharge
-                if lookahead_steps > 0:
-                    future = rl_arr[iz, t : t + lookahead_steps]
-                    remaining = 1 + int(np.sum(future > 0.0))
-                    target = soc * one_way_eff / remaining
-                else:
-                    target = soc * one_way_eff
-                discharge = min(rl_t, max_pwr, target)
-                soc -= discharge / one_way_eff
-                rl_new[iz, t] = rl_t - discharge
-            soc_arr[iz, t] = soc
+
+            max_pwr = cap / battery_duration_h * 3.0  # GWh per 3h step
+            soc = cap * initial_soc_fraction
+
+            for t in range(n_time):
+                rl_t = rl_arr[iz, t]
+                if np.isnan(rl_t):
+                    soc_arr[iz, t] = soc
+                    continue
+                if rl_t < 0.0:  # surplus → charge greedily
+                    charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
+                    soc += charge * one_way_eff
+                    rl_new[iz, t] = rl_t + charge
+                elif rl_t > 0.0:  # deficit → discharge
+                    if lookahead_steps > 0:
+                        future = rl_arr[iz, t : t + lookahead_steps]
+                        remaining = 1 + int(np.sum(future > 0.0))
+                        target = soc * one_way_eff / remaining
+                    else:
+                        target = soc * one_way_eff
+                    discharge = min(rl_t, max_pwr, target)
+                    soc -= discharge / one_way_eff
+                    rl_new[iz, t] = rl_t - discharge
+                soc_arr[iz, t] = soc
+
+            if verbose:
+                print(f"  Zone {zones[iz]}: dispatched {cap:.2f} GWh battery")
 
     # Re-attach xarray coordinates; transpose back to original dim order
     orig_dims = ds_residual_zonal[rl_var].dims
@@ -1954,6 +2251,8 @@ def apply_prosumer_battery_dispatch(
     initial_soc_fraction: float = 0.50,
     zone_dim: str = "zone",
     rl_var: str = "residual_load",
+    method: str = "heuristic",
+    min_soc_fraction: float | None = None,
 ) -> xr.Dataset:
     """Apply PV-aware prosumer battery dispatch to reduce residual load extremes.
 
@@ -1988,6 +2287,17 @@ def apply_prosumer_battery_dispatch(
         Name of the zone coordinate.
     rl_var : str
         Name of the residual-load variable.
+    method : str
+        ``"heuristic"`` (default) uses the PV-gated greedy loop with a daily SOC
+        reset described above.  ``"optimal"`` instead solves a per-zone,
+        per-calendar-year QP (via Gurobi) that minimises Σ(net residual load)²
+        under an SOC balance, power/energy bounds, **daily cyclicity** (SOC forced
+        equal at every midnight, no cross-day shifting), and a charging mask that
+        forbids charging when ``da_pv_generation == 0`` — the optimisation analogue
+        of the behind-the-meter, daily-cycling heuristic.
+    min_soc_fraction : float or None
+        Only used when ``method="optimal"``.  Lower bound on SOC as a fraction of
+        capacity at every step.  ``None`` = no floor.
 
     Returns
     -------
@@ -2029,38 +2339,68 @@ def apply_prosumer_battery_dispatch(
     rl_new = rl_arr.copy()
     soc_arr = np.zeros_like(rl_arr)
 
-    for iz in range(n_zones):
-        cap = cap_by_zone[iz]
-        if cap <= 0.0:
-            continue
-
-        max_pwr = cap / battery_duration_h * 3.0
-        soc = cap * initial_soc_fraction
-
-        for t in range(n_time):
-            # Daily SOC reset at midnight (day boundary)
-            if t > 0 and time_hours[t] == 0:
-                soc = cap * initial_soc_fraction
-
-            rl_t = rl_arr[iz, t]
-            if np.isnan(rl_t):
-                soc_arr[iz, t] = soc
+    if method == "optimal":
+        # QP per zone and calendar year; daily cyclicity (8 steps = 24 h at 3-hourly
+        # resolution) plus a PV-surplus charging mask reproduce the behind-the-meter,
+        # daily-cycling behaviour of the heuristic.
+        _CYCLE_STEPS = 8
+        for iz in range(n_zones):
+            cap = cap_by_zone[iz]
+            if cap <= 0.0:
+                continue
+            max_pwr = cap / battery_duration_h * 3.0
+            for year in np.unique(time_index.year):
+                year_mask = time_index.year == year
+                rl_year = rl_arr[iz, year_mask]
+                if np.all(np.isnan(rl_year)):
+                    continue
+                nan_mask = np.isnan(rl_year)
+                rl_solve = np.where(nan_mask, 0.0, rl_year)
+                charge_mask = pv_arr[iz, year_mask] > 0.0
+                _, net_load, soc = _optimize_battery_gurobi(
+                    rl_solve, cap, max_pwr, one_way_eff,
+                    min_soc_fraction=min_soc_fraction,
+                    charge_mask=charge_mask,
+                    cycle_steps=_CYCLE_STEPS,
+                )
+                if net_load is None:
+                    continue
+                idx = np.where(year_mask)[0]
+                rl_new[iz, idx] = np.where(nan_mask, np.nan, net_load)
+                soc_arr[iz, idx] = soc
+    else:
+        for iz in range(n_zones):
+            cap = cap_by_zone[iz]
+            if cap <= 0.0:
                 continue
 
-            solar_on = pv_arr[iz, t] > 0.0
+            max_pwr = cap / battery_duration_h * 3.0
+            soc = cap * initial_soc_fraction
 
-            if solar_on and rl_t < 0.0:
-                # PV surplus → charge prosumer battery
-                charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
-                soc += charge * one_way_eff
-                rl_new[iz, t] = rl_t + charge
-            elif (not solar_on) and rl_t > 0.0:
-                # No sun, grid deficit → discharge prosumer battery
-                discharge = min(rl_t, max_pwr, soc * one_way_eff)
-                soc -= discharge / one_way_eff
-                rl_new[iz, t] = rl_t - discharge
+            for t in range(n_time):
+                # Daily SOC reset at midnight (day boundary)
+                if t > 0 and time_hours[t] == 0:
+                    soc = cap * initial_soc_fraction
 
-            soc_arr[iz, t] = soc
+                rl_t = rl_arr[iz, t]
+                if np.isnan(rl_t):
+                    soc_arr[iz, t] = soc
+                    continue
+
+                solar_on = pv_arr[iz, t] > 0.0
+
+                if solar_on and rl_t < 0.0:
+                    # PV surplus → charge prosumer battery
+                    charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
+                    soc += charge * one_way_eff
+                    rl_new[iz, t] = rl_t + charge
+                elif (not solar_on) and rl_t > 0.0:
+                    # No sun, grid deficit → discharge prosumer battery
+                    discharge = min(rl_t, max_pwr, soc * one_way_eff)
+                    soc -= discharge / one_way_eff
+                    rl_new[iz, t] = rl_t - discharge
+
+                soc_arr[iz, t] = soc
 
     orig_dims = ds_residual_zonal[rl_var].dims
     ds_out = ds_residual_zonal.copy()
@@ -2106,6 +2446,7 @@ def _optimize_reservoir_gurobi(
     E_max: float,
     P_max: float,
     min_storage_level_fraction: float | None = None,
+    efficiency: float = 0.9,
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Solve the annual reservoir dispatch QP using Gurobi.
 
@@ -2125,11 +2466,17 @@ def _optimize_reservoir_gurobi(
         Maximum turbine discharge per 3h step (GWh = installed GW × 3).
     min_storage_level_fraction :
         If set, storage cannot drop below ``min_storage_level_fraction × E_max``.
+    efficiency :
+        Turbine (water-to-wire) conversion efficiency in ``(0, 1]``.  Generating
+        ``G`` electrical GWh draws ``G / efficiency`` from storage, so the stored
+        potential is only partially recovered as electricity — analogous to the
+        battery discharge loss.  Default ``0.9``.
 
     Returns
     -------
     (dispatch, net_load, storage) arrays of length T, or (None, None, None)
-    if Gurobi does not find an optimal solution.
+    if Gurobi does not find an optimal solution.  ``dispatch`` is the electrical
+    generation ``G`` (what offsets the residual load).
     """
     import gurobipy as gp
     from gurobipy import GRB
@@ -2148,7 +2495,8 @@ def _optimize_reservoir_gurobi(
     S = m.addMVar(shape=T, lb=0.0, name="S")
     net_load = m.addMVar(shape=T, lb=-GRB.INFINITY, name="net_load")
 
-    m.addConstr(E[1:] == E[:-1] + inflow - G - S, name="Storage_Balance")
+    # Generating G electrical GWh consumes G / efficiency of stored energy.
+    m.addConstr(E[1:] == E[:-1] + inflow - G / efficiency - S, name="Storage_Balance")
     m.addConstr(E[0] == E[T], name="Cyclicity")
     m.addConstr(net_load == residual_load - G, name="Net_Load_Def")
     m.setObjective(net_load @ net_load, GRB.MINIMIZE)
@@ -2166,6 +2514,7 @@ def apply_reservoir_dispatch(
     power_col: str = "p_nom_discharge[GW]",
     energy_col: str = "E_store[TWh]",
     min_storage_level_fraction: float | None = None,
+    efficiency: float = 0.9,
     rl_var: str = "residual_load",
     country_dim: str = "country",
     verbose: bool = True,
@@ -2197,6 +2546,9 @@ def apply_reservoir_dispatch(
     min_storage_level_fraction :
         If set, storage cannot drop below this fraction of E_max at any step.
         Useful to model operational buffers.  Default ``None`` (no floor).
+    efficiency :
+        Turbine (water-to-wire) conversion efficiency in ``(0, 1]``; generating
+        ``G`` electrical GWh draws ``G / efficiency`` from storage.  Default ``0.9``.
     rl_var :
         Name of the residual-load variable in *ds_residual_load*.
     country_dim :
@@ -2259,7 +2611,8 @@ def apply_reservoir_dispatch(
 
             T = min(len(rl_year), len(inflow_year))
             dispatch, net_load, storage = _optimize_reservoir_gurobi(
-                rl_year[:T], inflow_year[:T], E_max, P_max, min_storage_level_fraction
+                rl_year[:T], inflow_year[:T], E_max, P_max, min_storage_level_fraction,
+                efficiency=efficiency,
             )
 
             if dispatch is None:

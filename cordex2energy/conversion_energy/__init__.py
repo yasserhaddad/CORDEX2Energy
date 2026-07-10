@@ -1,15 +1,8 @@
-"""Energy conversion modules for climate data."""
+"""Energy conversion modules for climate data.
 
-from .wind import *
-from .pv import *
-from .demand import *
-from .hydropower import *
-from .disaggregate import *
+Import directly from the submodule you need:
 
-__all__ = [
-    "wind",
-    "pv",
-    "demand",
-    "hydropower",
-    "disaggregate",
-]
+    from cordex2energy.conversion_energy.wind import WindPower
+    from cordex2energy.conversion_energy.pv import PVPower
+    from cordex2energy.conversion_energy.tyndp import compute_residual_load
+"""

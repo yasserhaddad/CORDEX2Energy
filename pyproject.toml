@@ -37,6 +37,7 @@ dependencies = [
     "regionmask>=0.9.0",
     "xclim>=0.28.0",
     "windpowerlib>=0.2.0",
+    "pvlib>=0.12.0",
     "scipy>=1.6.0",
     "statsmodels>=0.12.0",
     "netCDF4>=1.5.0",
@@ -55,9 +56,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yhaddad/ClimateScenarios4Energy-CH"
-Repository = "https://github.com/yhaddad/ClimateScenarios4Energy-CH"
-Documentation = "https://github.com/yhaddad/ClimateScenarios4Energy-CH/blob/main/README.md"
+Homepage = "https://github.com/yhaddad/CORDEX2Energy"
+Repository = "https://github.com/yhaddad/CORDEX2Energy"
+Documentation = "https://github.com/yhaddad/CORDEX2Energy/blob/main/README.md"
 
 [tool.setuptools.packages.find]
 include = ["cordex2energy*"]

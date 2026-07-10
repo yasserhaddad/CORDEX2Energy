@@ -1,14 +1,8 @@
-"""Utility functions for the package."""
+"""Utility functions for the package.
 
-from .utils_xarray import *
-from .utils_load_data import *
-from .metrics import *
-from .constants import *
+Import directly from the submodule you need:
 
-__all__ = [
-    "utils_xarray",
-    "utils_load_data",
-    "metrics",
-    "constants",
-    "cdo_commands",
-]
+    from cordex2energy.utils.constants import REFERENCE_PERIOD, EXTENT_CH
+    from cordex2energy.utils.utils_xarray import sel_extent
+    from cordex2energy.utils.metrics import compute_trend_statsmodel
+"""

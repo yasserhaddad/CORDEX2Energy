@@ -11,8 +11,6 @@ import pandas as pd
 import xarray as xr
 from dask.diagnostics import ProgressBar
 
-
-
 from cordex2energy.conversion_energy.pv import (
     NORMALISED_ROOFTOP_PV_CONFIGURATION,
     compute_pv_from_config,
@@ -30,6 +28,7 @@ from cordex2energy.utils.utils_xarray import (
     get_time_resolution,
     sel_extent,
     match_instaneous_to_mean_values,
+    sanitize_netcdf_attrs,
 )
 from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
 
@@ -70,7 +69,6 @@ if __name__ == "__main__":
     output_path_temp_solar = path_data_temporary / "energy" / args.scope / "pv" / model_tag
     output_path_temp_solar.mkdir(parents=True, exist_ok=True)
 
-    # dask.config.set(num_workers=15, scheduler="processes")
     dask.config.set(num_workers=15, threads_per_worker=16)
     dask.config.set(
         {
@@ -86,7 +84,7 @@ if __name__ == "__main__":
 
     print("Loading data")
     extent = EXTENT_BC if args.scope == "europe" else EXTENT_CH
-    spatial_chunks = {"lat": 30, "lon": 30}
+    spatial_chunks = {"lat": 20, "lon": 20}
 
     if args.scope == "europe":
         if is_cerra:
@@ -124,6 +122,7 @@ if __name__ == "__main__":
             extent=extent,
             chunks="auto",
         )
+        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=slice("1991", "2020"))
         time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
         ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
         ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
@@ -201,23 +200,32 @@ if __name__ == "__main__":
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['rsds']}.zarr",
                 extent=extent, chunks="auto",
             )
+            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=slice("1991", "2020"))
             time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
             ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
             ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
             ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["rsds"]: "rsds"})
+            if "height" in ds_rsds_bc.ds_data.dims:
+                ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.squeeze("height", drop=True)
 
             ds_tas_bc = ClimateReanalysisData(
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr",
                 extent=extent, chunks="auto",
             )
-            ds_tas_bc.ds_data = ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
+            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=slice("1991", "2020"))
+            ds_tas_bc.ds_data = (
+                ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
+                .squeeze("height", drop=True)
+            )
 
             ds_sfcWind_bc = ClimateReanalysisData(
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['sfcWind']}.zarr",
                 extent=extent, chunks="auto",
             )
-            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.rename(
-                {CORDEX_TO_CERRA_VARS["sfcWind"]: "sfcWind"}
+            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(time=slice("1991", "2020"))
+            ds_sfcWind_bc.ds_data = (
+                ds_sfcWind_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["sfcWind"]: "sfcWind"})
+                .squeeze("height", drop=True)
             )
         else:
             ds_rsds_bc = ClimateModelData(
@@ -265,25 +273,47 @@ if __name__ == "__main__":
             ]
             if not all((arrs[0] == arr).all() for arr in arrs):
                 raise ValueError(f"Mismatch in {coord} coordinates among datasets.")
-        print("Matching instantaneous to mean values")
-        with ProgressBar(dt=60):
-            ds_tas_bc.ds_data = match_instaneous_to_mean_values(
-                ds_tas_bc.ds_data - 273.15, skip_leap_days=True, time_res="3h"
-            ).persist()
-            ds_tas_bc.ds_data["time"] = ds_tas_bc.ds_data["time"] + pd.Timedelta(
-                hours=1, minutes=30
-            )
-            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=ds_rsds_bc.ds_data.time)
 
-            ds_sfcWind_bc.ds_data = match_instaneous_to_mean_values(
-                ds_sfcWind_bc.ds_data, skip_leap_days=True, time_res="3h"
-            ).persist()
-            ds_sfcWind_bc.ds_data["time"] = ds_sfcWind_bc.ds_data[
-                "time"
-            ] + pd.Timedelta(hours=1, minutes=30)
-            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(
-                time=ds_rsds_bc.ds_data.time
-            )
+        print("Matching instantaneous to mean values")
+        if is_cerra:
+            # CERRA is already 3-hourly. ssrd[t] is the mean flux over (t-3h, t);
+            # 2t and 10si are instantaneous at 00:00, 03:00, 06:00, …
+            # A rolling 2-point mean gives (f[t-3h] + f[t]) / 2, which matches the
+            # ssrd window without expanding the time axis to hourly resolution.
+            with ProgressBar(dt=60):
+                ds_tas_bc.ds_data = (
+                    (ds_tas_bc.ds_data - 273.15)
+                    .rolling(time=2, min_periods=2)
+                    .mean()
+                    .sel(time=ds_rsds_bc.ds_data.time)
+                    .persist()
+                )
+                ds_sfcWind_bc.ds_data = (
+                    ds_sfcWind_bc.ds_data
+                    .rolling(time=2, min_periods=2)
+                    .mean()
+                    .sel(time=ds_rsds_bc.ds_data.time)
+                    .persist()
+                )
+        else:
+            with ProgressBar(dt=60):
+                ds_tas_bc.ds_data = match_instaneous_to_mean_values(
+                    ds_tas_bc.ds_data - 273.15, skip_leap_days=True, time_res="3h"
+                ).persist()
+                ds_tas_bc.ds_data["time"] = ds_tas_bc.ds_data["time"] + pd.Timedelta(
+                    hours=1, minutes=30
+                )
+                ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=ds_rsds_bc.ds_data.time)
+
+                ds_sfcWind_bc.ds_data = match_instaneous_to_mean_values(
+                    ds_sfcWind_bc.ds_data, skip_leap_days=True, time_res="3h"
+                ).persist()
+                ds_sfcWind_bc.ds_data["time"] = ds_sfcWind_bc.ds_data[
+                    "time"
+                ] + pd.Timedelta(hours=1, minutes=30)
+                ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(
+                    time=ds_rsds_bc.ds_data.time
+                )
 
         step_start = time.time()
         azimuths = (
@@ -374,7 +404,7 @@ if __name__ == "__main__":
                         "aggregation": "median_and_better",
                         "domain": "onshore",
                     })
-                ds_pv_agg.to_netcdf(output_path_agg, mode="w")
+                sanitize_netcdf_attrs(ds_pv_agg).to_netcdf(output_path_agg, mode="w")
                 print(f"PV aggregated data saved to {output_path_agg}")
 
             del ds_pv, ds_rsds_bc, ds_tas_bc, ds_sfcWind_bc, ds_pv_agg
@@ -410,7 +440,7 @@ if __name__ == "__main__":
             )
 
             output_path_agg = output_path_solar / f"pv_agg_{model_tag}.nc"
-            ds_pv_agg.compute().to_netcdf(output_path_agg, mode="w")
+            sanitize_netcdf_attrs(ds_pv_agg.compute()).to_netcdf(output_path_agg, mode="w")
             del ds_pv_agg
 
     print("Removing temporary files...")

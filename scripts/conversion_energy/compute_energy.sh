@@ -50,11 +50,14 @@ scenario="none"
 scope="europe"
 mkdir -p "logs/${scope}/${model}"
 
-echo "Computing wind power for CERRA..."
-nice -10 python -u compute_wind_power.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/wind_power_${current_date}.log"
+# echo "Computing wind power for CERRA..."
+# nice -10 python -u compute_wind_power.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/wind_power_${current_date}.log"
 
-echo "Computing PV for CERRA..."
-nice -10 python -u compute_pv.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/pv_${current_date}.log"
+# echo "Computing PV for CERRA..."
+# nice -10 python -u compute_pv.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/pv_${current_date}.log"
 
 # echo "Computing demand for CERRA..."
 # nice -10 python -u compute_demand.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/demand_${current_date}.log"
+
+echo "Aggregating TYNDP zones for CERRA..."
+nice -10 python -u compute_tyndp_aggregates.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/tyndp_agg_${current_date}.log"

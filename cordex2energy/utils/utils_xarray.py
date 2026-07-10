@@ -1,3 +1,4 @@
+import json
 from typing import List, Union
 import xarray as xr
 import numpy as np
@@ -675,4 +676,19 @@ def cell_area_km2(da: xr.DataArray) -> xr.DataArray:
     # Broadcast to (lat, lon)
     area_2d = area.expand_dims(lon=da.lon)
     return area_2d.rename("cell_area_km2")
+
+
+def sanitize_netcdf_attrs(ds: xr.Dataset) -> xr.Dataset:
+    """Serialize dict/list variable attributes to JSON strings for NetCDF compatibility.
+
+    NetCDF does not support dict or list attribute values. This function converts any
+    such values to their JSON string representation so that ``to_netcdf`` succeeds.
+    The original structure can be recovered with ``json.loads(attr_value)``.
+    """
+    for var in ds.data_vars:
+        ds[var].attrs = {
+            k: json.dumps(v) if isinstance(v, (dict, list)) else v
+            for k, v in ds[var].attrs.items()
+        }
+    return ds
 

@@ -86,7 +86,10 @@ def load_and_process_data(
             / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr"
         )
         ds_tas_bc = ClimateReanalysisData(path_tas, extent=EXTENT_BC, chunks=chunks_bc)
-        ds_tas_bc.ds_data = ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
+        ds_tas_bc.ds_data = (
+            ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
+            .squeeze("height", drop=True)
+        )
     else:
         ds_tas_bc = ClimateModelData(
             Path(paths["path_data_processed"])
