@@ -62,12 +62,12 @@ for m_idx in "${!models[@]}"; do
     # echo "Computing hydropower..."
     # nice -10 python -u compute_hydropower.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/hydropower_${current_date}.log"
 
-    # echo "Computing Demand..."
-    # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
+    # echo "Computing degree days..."
+    # nice -10 python -u compute_degree_days.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/degree_days_${current_date}.log"
 
-    # echo "Computing (population-weighted) Demand..."
-    # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" --population_weighted 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
+    echo "Computing demand (JRC degree-day model; run derive_demand_coefficients.py once first)..."
+    nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
 
-    echo "Computing TYNDP aggregates..."
-    nice -10 python -u compute_tyndp_aggregates.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/tyndp_aggregates_${current_date}.log"
+    # echo "Computing TYNDP aggregates..."
+    # nice -10 python -u compute_tyndp_aggregates.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/tyndp_aggregates_${current_date}.log"
 done

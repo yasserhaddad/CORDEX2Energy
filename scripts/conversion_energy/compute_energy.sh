@@ -41,7 +41,10 @@ mkdir -p "logs/${scope}/${model}_${scenario}"
 # echo "Computing hydropower..."
 # nice -10 python -u compute_hydropower.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/hydropower_${current_date}.log"
 
-# echo "Computing Demand..."
+# echo "Computing degree days..."
+# nice -10 python -u compute_degree_days.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/degree_days_${current_date}.log"
+
+# echo "Computing demand (JRC degree-day model; needs demand_coefficients.csv from derive_demand_coefficients.py)..."
 # nice -10 python -u compute_demand.py  "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}_${scenario}/demand_${current_date}.log"
 
 # --- CERRA reanalysis baseline ---
@@ -56,8 +59,14 @@ mkdir -p "logs/${scope}/${model}"
 # echo "Computing PV for CERRA..."
 # nice -10 python -u compute_pv.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/pv_${current_date}.log"
 
-# echo "Computing demand for CERRA..."
-# nice -10 python -u compute_demand.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/demand_${current_date}.log"
+echo "Computing degree days for CERRA..."
+nice -10 python -u compute_degree_days.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/degree_days_${current_date}.log"
 
-echo "Aggregating TYNDP zones for CERRA..."
-nice -10 python -u compute_tyndp_aggregates.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/tyndp_agg_${current_date}.log"
+# Coefficients are derived once from CERRA degree days (needs compute_degree_days for CERRA first):
+# nice -10 python -u derive_demand_coefficients.py "$paths_file" 2>&1 | tee "logs/${scope}/${model}/derive_coeffs_${current_date}.log"
+
+echo "Computing demand for CERRA (JRC degree-day model)..."
+nice -10 python -u compute_demand.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/demand_${current_date}.log"
+
+# echo "Aggregating TYNDP zones for CERRA..."
+# nice -10 python -u compute_tyndp_aggregates.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/tyndp_agg_${current_date}.log"

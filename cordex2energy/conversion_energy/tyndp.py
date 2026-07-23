@@ -28,6 +28,8 @@ import pandas as pd
 import xarray as xr
 from shapely.ops import snap as _snap_geom
 
+from cordex2energy.utils.constants import REFERENCE_PERIOD
+
 _GISCO_BASE = "https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson"
 
 # Greece uses GR in TYNDP codes but EL in NUTS/Eurostat
@@ -673,56 +675,85 @@ def preprocess_thermal_demand(
     target_twh_per_country=None,
     loss_factor=1.176,
     rolling_window=4,
+    upsample_to_1h=True,
+    reference_period=REFERENCE_PERIOD,
 ):
-    """Pre-process a 3-hourly CERRA-based thermal demand series for
-    subtraction from TYNDP hourly market demand.
+    """Pre-process a thermal demand series for subtraction from / addition to
+    TYNDP hourly market demand.
 
-    Applies three sequential post-processing steps that bridge the
+    Applies up to three sequential post-processing steps that bridge the
     structural gap between raw climate-simulation output and ENTSO-E's
-    internally derived demand profiles:
+    internally derived demand profiles.  **Every step operates independently
+    on each data variable of ``ds_thermal``** — so heating and cooling can be
+    carried as two separate variables (``heating_demand`` / ``cooling_demand``)
+    and each is upsampled, smoothed and rescaled to *its own* target with no
+    cross-variable mixing.  A single lumped variable (``demand_profile``) is
+    just the one-variable case and reproduces the historical behaviour.
 
     **Step 1 — Temporal upsampling + thermal inertia smoothing (3 h → 1 h)**
 
-    CERRA yields blocky 3-hourly steps; real grids operate hourly and
-    real buildings have thermal mass.  The data is first upsampled to 1 h
-    via cubic spline interpolation (fills intermediate hours smoothly),
-    then a centered ``rolling_window``-hour rolling mean is applied.
+    3-hourly demand.ninja/CERRA output is blocky; real grids operate hourly and
+    real buildings have thermal mass.  When ``upsample_to_1h`` is True the data
+    is first upsampled to 1 h via cubic spline interpolation, then a centered
+    ``rolling_window``-hour rolling mean is applied.  For an already-hourly
+    product (the JRC ``cordex2energy_demand`` NetCDFs) pass
+    ``upsample_to_1h=False`` to skip the interpolation; the rolling
+    thermal-inertia mean is still applied (a model-independent physical
+    smoothing).
 
     **Step 2 — Real-world COP / loss correction**
 
-    The ENTSO-E Demand Forecasting Tool (DFT) mandates a 0.85 COP correction
-    factor for defrost cycles, pipe losses, and field efficiency degradation.
-    Lowering the COP by 15 % raises the electrical draw by ×1.176 (= 1/0.85).
+    A flat ``loss_factor`` multiplier (default 1.176 = 1/0.85, the ENTSO-E DFT
+    COP correction).  Note: whenever Step 3 rescales to a target this factor
+    cancels exactly (it is absorbed by ``k``); it only affects countries that
+    have *no* target (``k = 1``).  Pass ``loss_factor=1.0`` for an
+    already-electric product such as ``cordex2energy_demand``.
 
-    **Step 3 — Volumetric rescaling to TYNDP annual TWh target**
+    **Step 3 — Volumetric rescaling to TYNDP annual TWh target (per variable)**
 
-    When ``target_twh_per_country`` is provided, each country profile is
-    scaled by ``k = E_target / E_simulated``.
+    When ``target_twh_per_country`` is provided, each *variable* of each
+    country is scaled by ``k = E_target / E_simulated`` where ``E_simulated``
+    is the mean annual sum over ``reference_period`` only.  Anchoring the
+    scaling to the reference period (rather than the whole 1991–2100 series)
+    keeps the future heating/cooling trend intact instead of diluting the
+    target with it.
 
     Parameters
     ----------
     ds_thermal : xr.Dataset
-        Raw thermal electricity demand in GW at native resolution
-        (typically 3-hourly for CERRA/C2E outputs).
-        Dimensions: ``(country, time)``.
+        Thermal electricity demand in GW, dims ``(country, time)``.  May carry
+        one variable (lumped ``demand_profile``) or two (``heating_demand`` +
+        ``cooling_demand``).
     target_twh_per_country : dict or pd.Series, optional
-        Annual electrical energy target per country ``{country_code: TWh}``.
-        Pass ``None`` (default) to skip rescaling.
+        Annual electrical energy target.  Two accepted forms:
+
+        * **per-variable (nested)** ``{var_name: {country: TWh}}`` — each
+          variable is rescaled to its own target;
+        * **flat** ``{country: TWh}`` — applied to every variable (the legacy
+          single-variable case).
+
+        ``None`` (default) skips rescaling.
     loss_factor : float, optional
-        Flat multiplier for real-world heat-pump COP degradation.
-        Default 1.176 (= 1/0.85, per ENTSO-E DFT).  Set to 1.0 to disable.
+        Flat COP/loss multiplier.  Default 1.176 (= 1/0.85).  Set to 1.0 to
+        disable.
     rolling_window : int, optional
-        Width of the centered rolling mean in hours applied after
-        upsampling.  Default 4.
+        Width of the centered rolling mean in hours.  Default 4.
+    upsample_to_1h : bool, optional
+        Whether to cubic-spline upsample 3 h → 1 h before smoothing.  Default
+        True; set False for an already-hourly input.
+    reference_period : sequence of two str, optional
+        ``(start, end)`` years over which ``E_simulated`` is computed for the
+        Step-3 rescaling.  Default :data:`REFERENCE_PERIOD` (1991–2020).  Pass
+        ``None`` to use the whole input series (legacy behaviour).
 
     Returns
     -------
     xr.Dataset
-        1-hourly thermal demand with the same variable names as the input,
-        in GW.
+        1-hourly thermal demand with the same variable names as the input, in
+        GW.  The variables are **not** summed here — the caller combines them.
     """
-    # ── Step 1a: Upsample 3 h → 1 h (cubic spline interpolation) ─────────────
-    ds_1h = ds_thermal.resample(time="1h").interpolate("cubic")
+    # ── Step 1a: Upsample 3 h → 1 h (cubic spline interpolation), if needed ───
+    ds_1h = ds_thermal.resample(time="1h").interpolate("cubic") if upsample_to_1h else ds_thermal
 
     # ── Step 1b: Thermal inertia smoothing (centered rolling mean) ────────────
     ds_smooth = ds_1h.rolling(
@@ -732,32 +763,38 @@ def preprocess_thermal_demand(
     # ── Step 2: Real-world COP / loss correction ──────────────────────────────
     ds_scaled = ds_smooth * loss_factor
 
-    # ── Step 3: Volumetric rescaling to TYNDP annual TWh target ──────────────
+    # ── Step 3: Per-variable volumetric rescaling to TYNDP annual TWh target ──
     if target_twh_per_country is not None:
-        scale_values = []
-        for country in ds_scaled.country.values:
-            c = str(country)
-            if c in target_twh_per_country:
-                # Annual GWh = Σ(GW values) × 1 h; /1000 → TWh
-                simulated_twh = sum(
-                    float(ds_scaled[v].sel(country=country).resample(time="YS").sum().mean(dim="time").values)
-                    for v in ds_scaled.data_vars
-                ) * 1e-3
-                k = (
-                    float(target_twh_per_country[c]) / simulated_twh
-                    if simulated_twh > 0
-                    else 1.0
-                )
-            else:
-                k = 1.0
-            scale_values.append(k)
+        # Resolve the target dict for a given variable: nested {var: {country:}}
+        # picks the per-variable dict; a flat {country: twh} applies to every
+        # variable (the legacy single-variable / lumped case).
+        _is_nested = isinstance(next(iter(target_twh_per_country.values()), None), dict)
 
-        scale_da = xr.DataArray(
-            scale_values,
-            dims=["country"],
-            coords={"country": ds_scaled.country.values},
-        )
-        ds_scaled = ds_scaled * scale_da
+        def _target_for(var):
+            return target_twh_per_country.get(var) if _is_nested else target_twh_per_country
+
+        for v in ds_scaled.data_vars:
+            tv = _target_for(v)
+            if tv is None:
+                continue
+            scale_values = []
+            for country in ds_scaled[v].country.values:
+                c = str(country)
+                if c in tv:
+                    sim = ds_scaled[v].sel(country=country)
+                    if reference_period is not None:
+                        sim = sim.sel(time=slice(*reference_period))
+                    # Annual GWh = Σ(GW values) × 1 h; /1000 → TWh
+                    simulated_twh = float(sim.resample(time="YS").sum().mean(dim="time").values) * 1e-3
+                    k = float(tv[c]) / simulated_twh if simulated_twh > 0 else 1.0
+                else:
+                    k = 1.0
+                scale_values.append(k)
+            scale_da = xr.DataArray(
+                scale_values, dims=["country"],
+                coords={"country": ds_scaled[v].country.values},
+            )
+            ds_scaled[v] = ds_scaled[v] * scale_da
 
     return ds_scaled
 
@@ -786,7 +823,8 @@ def build_thermal_targets(
     scenario,
     year=2050,
     non_eu_proxy_map=None,
-    thermal_subsectors=("Space heating", "Space heating & hot water", "Cooling"),
+    heating_subsectors=("Space heating", "Space heating & hot water"),
+    cooling_subsectors=("Cooling",),
     ds_market=None,
 ):
     """Build a per-country thermal electricity TWh target dict for use in
@@ -816,8 +854,10 @@ def build_thermal_targets(
         Target year.  Default 2050.
     non_eu_proxy_map : dict, optional
         Override or extend default proxy pairings.
-    thermal_subsectors : tuple of str, optional
-        ``SUBSECTOR`` values treated as thermal electricity consumption.
+    heating_subsectors : tuple of str, optional
+        ``SUBSECTOR`` values treated as electric heating consumption.
+    cooling_subsectors : tuple of str, optional
+        ``SUBSECTOR`` values treated as electric cooling consumption.
     ds_market : xr.Dataset, optional
         TYNDP market demand profiles, dims ``(country, time)``,
         variable ``"demand_profile"`` in GW.  Used as ``E_total`` source
@@ -826,65 +866,60 @@ def build_thermal_targets(
     Returns
     -------
     dict
-        ``{country_code: thermal_twh_target}``.
+        ``{"heating": {country: twh}, "cooling": {country: twh},
+        "total": {country: twh}}``.  ``"total"`` is the spreadsheet
+        ``SUBSECTOR=="Total"`` electricity demand (EU-27 only, never backfilled
+        from ``ds_market``) used by the baseload modulation.
     """
     col = f"{year}_{scenario}"
     proxy_map = {**_DEFAULT_NON_EU_PROXIES, **(non_eu_proxy_map or {})}
 
-    # ── Thermal electricity by country ────────────────────────────────────────
-    mask_thermal = df_tyndp_demand["ENERGY_CARRIER"].eq("Electricity") & \
-                   df_tyndp_demand["SUBSECTOR"].isin(thermal_subsectors)
-    thermal_twh = (
-        df_tyndp_demand.loc[mask_thermal, ["COUNTRY", col]]
-        .dropna(subset=[col])
-        .groupby("COUNTRY")[col]
-        .sum()
-    )
+    def _by_country(subsectors):
+        mask = df_tyndp_demand["ENERGY_CARRIER"].eq("Electricity") & \
+               df_tyndp_demand["SUBSECTOR"].isin(subsectors)
+        return (
+            df_tyndp_demand.loc[mask, ["COUNTRY", col]]
+            .dropna(subset=[col])
+            .groupby("COUNTRY")[col]
+            .sum()
+        )
 
-    # ── Total electricity by country (EU-27 only in this spreadsheet) ─────────
-    mask_total = df_tyndp_demand["ENERGY_CARRIER"].eq("Electricity") & \
-                 df_tyndp_demand["SUBSECTOR"].eq("Total")
-    total_twh = (
-        df_tyndp_demand.loc[mask_total, ["COUNTRY", col]]
-        .dropna(subset=[col])
-        .groupby("COUNTRY")[col]
-        .sum()
-    )
+    # Heating / cooling electricity by country (EU-27, direct from spreadsheet).
+    heating_twh = _by_country(heating_subsectors)
+    cooling_twh = _by_country(cooling_subsectors)
 
-    # ── Pre-compute market annual totals from ds_market (GW·h → TWh) ─────────
-    # ds_market typically covers multiple climate years (1995, 2008, 2009);
-    # divide by the number of unique years to obtain a mean annual total.
+    # Total electricity by country (EU-27 only in this spreadsheet).
+    total_twh = _by_country(["Total"])
+
+    # Pre-compute market annual totals from ds_market (MWh -> TWh); used ONLY as
+    # the non-EU proxy E_total source, never for the returned "total".
     market_twh: dict[str, float] = {}
     if ds_market is not None:
         n_years = max(1, len(np.unique(ds_market.time.dt.year.values)))
         for c in ds_market.country.values:
-            # convert from MWh to TWh and average across climate years
             v = float(ds_market["demand_profile"].sel(country=c).values.sum()) * 1e-6 / n_years
             if v > 0:
                 market_twh[str(c)] = v
 
-    # ── Build target dict ─────────────────────────────────────────────────────
-    targets: dict[str, float] = {}
+    # Per-type target dicts (EU-27 direct entries).
+    targets_heat: dict[str, float] = {c: float(v) for c, v in heating_twh.items() if float(v) > 0}
+    targets_cool: dict[str, float] = {c: float(v) for c, v in cooling_twh.items() if float(v) > 0}
+    total: dict[str, float] = {c: float(v) for c, v in total_twh.items() if float(v) > 0}
 
-    # EU countries: use direct thermal target from the spreadsheet
-    for country, v in thermal_twh.items():
-        if float(v) > 0:
-            targets[country] = float(v)
-
-    # Non-EU countries: synthesise via proxy thermal-share method
+    # Non-EU countries: synthesise heating/cooling via the proxy thermal-share
+    # method, splitting the proxy share into a heating share and a cooling share.
     for country, proxy in proxy_map.items():
-        if country in targets:
+        if country in targets_heat or country in targets_cool:
             continue                              # already has a direct entry
-        if proxy not in thermal_twh or proxy not in total_twh:
+        if proxy not in total_twh or float(total_twh[proxy]) <= 0:
             print(f"Warning: proxy '{proxy}' for '{country}' not found in "
-                  f"TYNDP demand data — skipping.")
-            continue
-        if float(total_twh[proxy]) <= 0:
+                  f"TYNDP demand data - skipping.")
             continue
 
-        alpha = float(thermal_twh[proxy]) / float(total_twh[proxy])
+        alpha_heat = float(heating_twh.get(proxy, 0.0)) / float(total_twh[proxy])
+        alpha_cool = float(cooling_twh.get(proxy, 0.0)) / float(total_twh[proxy])
 
-        # Prefer spreadsheet total; fall back to ds_market annual sum
+        # Prefer spreadsheet total; fall back to ds_market annual sum.
         if country in total_twh and float(total_twh[country]) > 0:
             e_total = float(total_twh[country])
             source = "spreadsheet"
@@ -893,16 +928,17 @@ def build_thermal_targets(
             source = "ds_market"
         else:
             print(f"Warning: no total electricity demand found for '{country}' "
-                  f"in TYNDP demand data or ds_market — cannot synthesise "
+                  f"in TYNDP demand data or ds_market - cannot synthesise "
                   f"thermal target (falling back to k=1).")
             continue
 
-        targets[country] = alpha * e_total
-        print(f"  {country}: proxy='{proxy}', \u03b1={alpha:.3f}, "
-              f"E_total={e_total:.1f} TWh [{source}] \u2192 "
-              f"E_thermal={targets[country]:.1f} TWh")
+        targets_heat[country] = alpha_heat * e_total
+        targets_cool[country] = alpha_cool * e_total
+        print(f"  {country}: proxy='{proxy}', a_heat={alpha_heat:.3f}, "
+              f"a_cool={alpha_cool:.3f}, E_total={e_total:.1f} TWh [{source}] -> "
+              f"E_heat={targets_heat[country]:.1f}, E_cool={targets_cool[country]:.1f} TWh")
 
-    return targets
+    return {"heating": targets_heat, "cooling": targets_cool, "total": total}
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1082,8 @@ def compute_residual_load(
     loss_factor=1.176,
     rolling_window_thermal_demand=4,
     rolling_window_residual_load=8,
+    upsample_to_1h=True,
+    reference_period=REFERENCE_PERIOD,
     country_dim="country",
     return_generation_demand_components=False,
 ):
@@ -1135,39 +1173,54 @@ def compute_residual_load(
         _years = np.unique(ds_gen_pv.time.dt.year.values)
         ds_baseload = expand_typical_year(ds_baseload, years=_years)
 
-    # ── Step 1: Combine heating + cooling → thermal demand (3-hourly) ─────────
+    # ── Step 1: Build thermal demand (per-variable, or lumped for legacy) ──────
+    # Nested target {var: {country: twh}} -> keep heating & cooling as separate
+    # variables so each is rescaled to its own reference-period target. A flat
+    # {country: twh} target (or None) reproduces the legacy lumped single series.
     common_time_th = np.intersect1d(ds_heating.time.values, ds_cooling.time.values)
-    ds_thermal = xr.Dataset(
-        {
+    _nested = (
+        isinstance(target_twh_per_country, dict)
+        and isinstance(next(iter(target_twh_per_country.values()), None), dict)
+    )
+    if _nested:
+        ds_thermal = xr.Dataset({
+            "heating_demand": ds_heating["heating_demand"].sel(time=common_time_th),
+            "cooling_demand": ds_cooling["cooling_demand"].sel(time=common_time_th),
+        })
+    else:
+        ds_thermal = xr.Dataset({
             "demand_profile": (
                 ds_heating["heating_demand"].sel(time=common_time_th)
                 + ds_cooling["cooling_demand"].sel(time=common_time_th)
             )
-        }
-    )
+        })
 
-    # ── Step 2: Preprocess thermal demand → 1-hourly GW ───────────────────────
+    # ── Step 2: Preprocess thermal demand → 1-hourly GW (per variable) ────────
     ds_thermal_1h = preprocess_thermal_demand(
         ds_thermal,
         target_twh_per_country=target_twh_per_country,
         loss_factor=loss_factor,
         rolling_window=rolling_window_thermal_demand,
+        upsample_to_1h=upsample_to_1h,
+        reference_period=reference_period,
     )
 
     # ── Step 3: Merge baseload + thermal → total 1-hourly demand ──────────────
+    # Sum the (1 or 2) thermal variables back together before adding to baseload.
+    thermal_total_1h = _sum_vars(ds_thermal_1h)
     common_countries_demand = np.intersect1d(
         ds_baseload[country_dim].values,
-        ds_thermal_1h[country_dim].values,
+        thermal_total_1h[country_dim].values,
     )
     common_time_1h = np.intersect1d(
         ds_baseload.time.values,
-        ds_thermal_1h.time.values,
+        thermal_total_1h.time.values,
     )
     total_demand_1h = (
         ds_baseload["baseload"].sel(
             {country_dim: common_countries_demand, "time": common_time_1h}
         )
-        + ds_thermal_1h["demand_profile"].sel(
+        + thermal_total_1h.sel(
             {country_dim: common_countries_demand, "time": common_time_1h}
         )
     )
@@ -1580,6 +1633,63 @@ def build_c2e_name_to_iso2(
     return name_to_iso2
 
 
+def load_c2e_demand_nc(
+    path_demand_nc: Union[str, Path],
+    name_to_iso2: dict,
+    time_slice=None,
+) -> tuple[xr.Dataset, xr.Dataset]:
+    """Load the JRC-coefficient (``cordex2energy_demand``) hourly demand NetCDF.
+
+    Returns ``(ds_heating_demand, ds_cooling_demand)`` in exactly the shape the
+    demand.ninja CSV loaders yield — two single-variable datasets
+    (``heating_demand`` / ``cooling_demand``, dims ``(country, time)``, GW) with
+    the ``country`` coordinate remapped to ISO2 via *name_to_iso2* — so the rest
+    of the pipeline is agnostic to which demand product was used.  The ``.nc`` is
+    **hourly** (vs the 3-hourly CSVs); callers pass ``upsample_to_1h=False`` to
+    :func:`preprocess_thermal_demand` accordingly.
+
+    Parameters
+    ----------
+    path_demand_nc:
+        Path to ``energy/europe/demand/{model_scenario}.nc`` (or ``cerra.nc``),
+        the output of ``compute_demand.py`` (vars ``heating_demand`` /
+        ``cooling_demand`` [GW], dims ``time``/``country`` with 37 canonical
+        country names).
+    name_to_iso2:
+        Full-name → ISO2 mapping (from :func:`build_c2e_name_to_iso2`).  The
+        ``.nc`` uses the same canonical names as the demand.ninja CSVs, so this
+        yields the same ISO2 country set.
+    time_slice:
+        Optional ``(start, end)`` passed to ``.sel(time=slice(...))`` (e.g. the
+        reference period for CERRA).
+
+    Returns
+    -------
+    (xr.Dataset, xr.Dataset)
+        ``ds_heating_demand`` (var ``heating_demand``) and ``ds_cooling_demand``
+        (var ``cooling_demand``).
+    """
+    ds = xr.open_dataset(path_demand_nc)
+    iso2 = [name_to_iso2.get(str(c).strip(), str(c).strip()) for c in ds["country"].values]
+
+    # Diagnostic: flag any country that failed to map to a 2-letter ISO2 code —
+    # such a country would silently drop out of the ISO2-based intersections
+    # downstream instead of raising.
+    unmapped = sorted({str(c) for c, code in zip(ds["country"].values, iso2)
+                       if not (isinstance(code, str) and len(code) == 2)})
+    if unmapped:
+        print(f"  [WARN] load_c2e_demand_nc: {len(unmapped)} country name(s) did not "
+              f"map to ISO2 (will not intersect downstream): {unmapped}")
+
+    ds = ds.assign_coords(country=iso2)
+    if time_slice is not None:
+        ds = ds.sel(time=slice(*time_slice))
+
+    ds_heating = ds[["heating_demand"]]
+    ds_cooling = ds[["cooling_demand"]]
+    return ds_heating, ds_cooling
+
+
 # ---------------------------------------------------------------------------
 # Demand profile loading helpers
 # ---------------------------------------------------------------------------
@@ -1671,12 +1781,39 @@ def compute_or_load_baseload(
     df_tyndp_demand: pd.DataFrame,
     C2E_NAME_TO_ISO2: dict,
     floor_fraction: float = 0.15,
+    demand_model: str = "demand.ninja",
+    path_energy_demand: Path = None,
+    modulate_baseload: bool = True,
+    reference_period=REFERENCE_PERIOD,
+    legacy_thermal: bool = False,
 ) -> xr.Dataset:
     """Return the typical-year TYNDP baseload, loading from cache when available.
 
-    The baseload depends only on the TYNDP demand scenario and year (not on the
-    climate model), so it is computed once from CERRA reference data + TYNDP
-    demand profiles and then cached.
+    The baseload depends on the TYNDP demand scenario/year **and the demand
+    model** (the CERRA heating/cooling that is subtracted must match the model
+    added back in :func:`compute_residual_load`), so it is computed once from
+    CERRA reference-period demand + TYNDP profiles and cached per
+    ``(scenario, year, demand_model, legacy)``.
+
+    Extra parameters
+    ----------------
+    demand_model : str
+        ``"demand.ninja"`` (3-hourly CERRA CSVs) or ``"cordex2energy_demand"``
+        (hourly ``cerra.nc`` under ``path_energy_demand``).
+    path_energy_demand : Path
+        ``energy/europe/demand`` directory (required for
+        ``cordex2energy_demand`` — holds ``cerra.nc``).
+    modulate_baseload : bool
+        If True (default) scale each **TYNDP-scenario** country's baseload so its
+        annual total equals ``total − heating − cooling``.  Non-scenario
+        countries keep their unmodulated baseload.  Ignored under
+        ``legacy_thermal``.
+    reference_period : sequence of two str
+        Years for the CERRA slice and the Step-3 rescale anchor.  Default
+        :data:`REFERENCE_PERIOD`.
+    legacy_thermal : bool
+        Reproduce the historical behaviour (lumped heating+cooling target,
+        whole-series ``k``, no modulation).
 
     Parameters
     ----------
@@ -1703,13 +1840,20 @@ def compute_or_load_baseload(
         Typical-year baseload with ``hour_of_year`` dimension and
         ``"baseload"`` variable.
     """
-    cache_path = path_baseload_cache / f"baseload_{demand_scenario}_{demand_year}.nc"
+    dm_tag = {"demand.ninja": "dninja", "cordex2energy_demand": "c2edem"}.get(
+        demand_model, demand_model
+    )
+    cache_path = path_baseload_cache / (
+        f"baseload_{demand_scenario}_{demand_year}_{dm_tag}"
+        f"{'_legacy' if legacy_thermal else ''}.nc"
+    )
 
     if cache_path.exists():
-        print(f"  Found cached baseload → {cache_path}")
+        print(f"  Found cached baseload -> {cache_path}")
         return xr.open_dataset(cache_path)
 
-    print(f"  Baseload cache not found — computing for {demand_scenario} {demand_year} …")
+    print(f"  Baseload cache not found - computing for {demand_scenario} {demand_year} "
+          f"[{demand_model}{', legacy' if legacy_thermal else ''}] ...")
 
     # Load TYNDP demand profiles for this scenario/year.
     path_demand_profiles_dir = path_tyndp / "Demand Profiles"
@@ -1717,73 +1861,94 @@ def compute_or_load_baseload(
         path_demand_profiles_dir, demand_scenario, demand_year
     )
 
-    # Build thermal electricity targets from the TYNDP demand scenario table.
-    thermal_targets = build_thermal_targets(
+    # Build per-type (heating/cooling) + total electricity targets.
+    targets = build_thermal_targets(
         df_tyndp_demand,
         scenario=demand_scenario,
         year=demand_year,
         ds_market=ds_market,
     )
 
-    # Load CERRA heating and cooling demand (reference-period reanalysis data).
-    path_c2e_cerra = path_c2e_cerra / "output_variables"
-    df_heating_cerra = pd.read_csv(
-        path_c2e_cerra / "heating-demand_CERRA.csv", index_col=0
-    )
-    df_cooling_cerra = pd.read_csv(
-        path_c2e_cerra / "cooling-demand_CERRA.csv", index_col=0
-    )
-    ds_heating_cerra = (
-        xr.DataArray(
-            df_heating_cerra.values,
-            dims=["country", "time"],
-            coords={
-                "country": [C2E_NAME_TO_ISO2.get(c, c) for c in df_heating_cerra.index],
-                "time": pd.to_datetime(df_heating_cerra.columns),
-            },
-            name="heating_demand",
+    # Load reference-period CERRA heating/cooling demand from the SELECTED demand
+    # model, so the thermal subtracted here matches what compute_residual_load
+    # adds back (subtract-then-add symmetry). Two single-var datasets.
+    if demand_model == "cordex2energy_demand":
+        if path_energy_demand is None:
+            raise ValueError(
+                "path_energy_demand is required for demand_model='cordex2energy_demand'"
+            )
+        ds_heating_cerra, ds_cooling_cerra = load_c2e_demand_nc(
+            Path(path_energy_demand) / "cerra.nc",
+            C2E_NAME_TO_ISO2,
+            time_slice=reference_period,
         )
-        .to_dataset()
-        .sel(time=slice("1991", "2020"))
-    )
-    ds_cooling_cerra = (
-        xr.DataArray(
-            df_cooling_cerra.values,
-            dims=["country", "time"],
-            coords={
-                "country": [C2E_NAME_TO_ISO2.get(c, c) for c in df_cooling_cerra.index],
-                "time": pd.to_datetime(df_cooling_cerra.columns),
-            },
-            name="cooling_demand",
+        upsample, loss = False, 1.0          # already hourly; already electric
+    else:
+        path_c2e_cerra_dir = path_c2e_cerra / "output_variables"
+        df_heating_cerra = pd.read_csv(
+            path_c2e_cerra_dir / "heating-demand_CERRA.csv", index_col=0
         )
-        .to_dataset()
-        .sel(time=slice("1991", "2020"))
-    )
+        df_cooling_cerra = pd.read_csv(
+            path_c2e_cerra_dir / "cooling-demand_CERRA.csv", index_col=0
+        )
+        ds_heating_cerra = (
+            xr.DataArray(
+                df_heating_cerra.values, dims=["country", "time"],
+                coords={"country": [C2E_NAME_TO_ISO2.get(c, c) for c in df_heating_cerra.index],
+                        "time": pd.to_datetime(df_heating_cerra.columns)},
+                name="heating_demand",
+            ).to_dataset().sel(time=slice(*reference_period))
+        )
+        ds_cooling_cerra = (
+            xr.DataArray(
+                df_cooling_cerra.values, dims=["country", "time"],
+                coords={"country": [C2E_NAME_TO_ISO2.get(c, c) for c in df_cooling_cerra.index],
+                        "time": pd.to_datetime(df_cooling_cerra.columns)},
+                name="cooling_demand",
+            ).to_dataset().sel(time=slice(*reference_period))
+        )
+        upsample, loss = True, 1 / 0.85      # 3-hourly; ENTSO-E COP correction
 
-    # Combine heating + cooling into a single thermal demand profile over the
-    # intersection of their time axes.
+    # Two-variable thermal dataset over the common time axis.
     _common_time = np.intersect1d(
         ds_heating_cerra.time.values, ds_cooling_cerra.time.values
     )
-    ds_thermal_cerra = xr.Dataset(
-        {
-            "demand_profile": (
-                ds_heating_cerra["heating_demand"].sel(time=_common_time)
-                + ds_cooling_cerra["cooling_demand"].sel(time=_common_time)
-            )
-        }
-    )
+    ds_thermal_cerra = xr.Dataset({
+        "heating_demand": ds_heating_cerra["heating_demand"].sel(time=_common_time),
+        "cooling_demand": ds_cooling_cerra["cooling_demand"].sel(time=_common_time),
+    })
 
-    # Upsample, smooth (thermal inertia), COP-correct, and rescale to TYNDP targets.
-    ds_thermal_preprocessed = preprocess_thermal_demand(
-        ds_thermal_cerra,
-        loss_factor=(1 / 0.85),
-        rolling_window=4,
-        target_twh_per_country=thermal_targets,
-    )
+    # Preprocess, then sum to the single `demand_profile` that compute_tyndp_baseload
+    # subtracts. Heating/cooling are rescaled to SEPARATE targets ONLY for
+    # cordex2energy_demand; demand.ninja uses a single LUMPED target (its
+    # reference-period cooling is ~0 in cool countries, so a split k_cool =
+    # cool_target / ~0 explodes — the lumped, heating-dominated denominator is
+    # safe). Legacy additionally drops the reference-period anchor (whole series).
+    split_targets = (demand_model == "cordex2energy_demand") and not legacy_thermal
+    if split_targets:
+        ds_pp = preprocess_thermal_demand(
+            ds_thermal_cerra,
+            target_twh_per_country={"heating_demand": targets["heating"],
+                                    "cooling_demand": targets["cooling"]},
+            loss_factor=loss, rolling_window=4, upsample_to_1h=upsample,
+            reference_period=reference_period,
+        )
+        thermal_sum = ds_pp["heating_demand"] + ds_pp["cooling_demand"]
+    else:
+        ds_thermal_in = xr.Dataset({
+            "demand_profile": ds_thermal_cerra["heating_demand"] + ds_thermal_cerra["cooling_demand"]
+        })
+        lump = {c: targets["heating"].get(c, 0.0) + targets["cooling"].get(c, 0.0)
+                for c in set(targets["heating"]) | set(targets["cooling"])}
+        ds_pp = preprocess_thermal_demand(
+            ds_thermal_in, target_twh_per_country=lump, loss_factor=loss,
+            rolling_window=4, upsample_to_1h=upsample,
+            reference_period=None if legacy_thermal else reference_period,
+        )
+        thermal_sum = ds_pp["demand_profile"]
+    ds_thermal_preprocessed = xr.Dataset({"demand_profile": thermal_sum})
 
-    # Subtract thermal demand from total TYNDP market demand → non-thermal baseload.
-    # market + prosumer are in MWh; convert to GWh with × 1e-3.
+    # Baseload = (market + prosumer) - thermal, floored. market/prosumer MWh -> GWh.
     ds_total_market = (ds_market + ds_prosumer.reindex(
         country=ds_market.country, fill_value=0.0
     )) * 1e-3
@@ -1793,12 +1958,37 @@ def compute_or_load_baseload(
         floor_fraction=floor_fraction,
     )
 
+    # Optional baseload modulation: scale each country's baseload so its annual
+    # total matches (TYNDP total electricity - heating - cooling). Restricted to
+    # countries present in the TYNDP demand scenario (the EU-27 "total" dict);
+    # proxy/ds_market-synthesised countries keep their unmodulated baseload.
+    if modulate_baseload and not legacy_thermal:
+        total = targets["total"]
+        n_years = max(1, len(np.unique(ds_baseload.time.dt.year.values)))
+        m_vals = []
+        for c in ds_baseload.country.values:
+            cc = str(c)
+            base_twh = float(ds_baseload["baseload"].sel(country=c).sum().values) * 1e-3 / n_years
+            tgt = (total.get(cc, 0.0)
+                   - targets["heating"].get(cc, 0.0)
+                   - targets["cooling"].get(cc, 0.0))
+            m_vals.append(tgt / base_twh if (cc in total and base_twh > 0 and tgt > 0) else 1.0)
+        m_da = xr.DataArray(m_vals, dims=["country"],
+                            coords={"country": ds_baseload.country.values})
+        ds_baseload = ds_baseload * m_da
+        # Re-clamp to the floor (modulation can push a country below it).
+        floor = (floor_fraction * ds_total_market["demand_profile"].mean(dim="time")).to_dataset(name="baseload")
+        ds_baseload = ds_baseload.where(ds_baseload >= floor, other=floor)
+        n_mod = int(sum(1 for c in ds_baseload.country.values if str(c) in total))
+        print(f"  Modulated baseload for {n_mod} TYNDP-scenario countries "
+              f"(total - heating - cooling).")
+
     # Build a typical-year (hour_of_year) profile by averaging TYNDP climate years.
     ds_baseload_typical = compute_typical_year_profile(ds_baseload)
 
     # Cache to disk.
     ds_baseload_typical.to_netcdf(cache_path)
-    print(f"  Saved baseload cache → {cache_path}")
+    print(f"  Saved baseload cache -> {cache_path}")
 
     return ds_baseload_typical
 
@@ -1809,8 +1999,6 @@ def _optimize_battery_gurobi(
     P_max: float,
     one_way_eff: float,
     min_soc_fraction: float | None = None,
-    charge_mask: np.ndarray | None = None,
-    cycle_steps: int | None = None,
     initial_soc: float | None = None,
     env=None,
     max_signfix_passes: int = 4,
@@ -1857,20 +2045,12 @@ def _optimize_battery_gurobi(
         and on discharge.
     min_soc_fraction :
         If set, SOC cannot drop below ``min_soc_fraction × E_max`` at any step.
-    charge_mask :
-        Optional boolean array (length T).  Where ``False``, charging is forbidden
-        (upper bound 0) — used to keep prosumer charging to PV-surplus hours.
-    cycle_steps :
-        Storage boundary condition when ``initial_soc`` is ``None``.  If ``None``,
-        a single cyclicity constraint ``E[0] == E[T]`` is imposed (perfect
-        foresight over the horizon).  If set (e.g. ``8`` for 24 h at 3-hourly
-        resolution), the SOC is forced equal at every multiple of ``cycle_steps``
-        — daily cycling with no cross-day energy shifting.  Ignored when
-        ``initial_soc`` is given.
     initial_soc :
-        If set, fix ``E[0] == initial_soc`` and impose **no** cyclicity (open
-        horizon; terminal SOC is free).  Used by the rolling day-ahead scheduler,
-        which seeds each window with the SOC carried from the previous window.
+        Storage boundary condition.  If ``None`` (default), a cyclicity constraint
+        ``E[0] == E[T]`` is imposed (perfect foresight over the horizon).  If set,
+        ``E[0]`` is fixed to it and **no** cyclicity applies (open horizon; terminal
+        SOC is free) — used by the rolling day-ahead scheduler, which seeds each
+        window with the SOC carried from the previous window.
     env :
         Optional pre-started Gurobi ``Env`` to reuse across many solves (avoids
         per-call licence/startup cost).  If ``None``, a local env is created and
@@ -1893,11 +2073,6 @@ def _optimize_battery_gurobi(
     T = len(residual_load)
     E_min = E_max * min_soc_fraction if min_soc_fraction is not None else 0.0
 
-    # Charging is forbidden wherever charge_mask is False (e.g. prosumer PV hours).
-    charge_ub = np.full(T, P_max, dtype=float)
-    if charge_mask is not None:
-        charge_ub = np.where(charge_mask, P_max, 0.0)
-
     _owns_env = env is None
     if _owns_env:
         env = gp.Env(empty=True)
@@ -1909,7 +2084,7 @@ def _optimize_battery_gurobi(
         m = gp.Model("Battery_Dispatch", env=env)
 
         E = m.addMVar(shape=T + 1, lb=E_min, ub=E_max, name="E")
-        c = m.addMVar(shape=T, lb=0.0, ub=charge_ub, name="charge")
+        c = m.addMVar(shape=T, lb=0.0, ub=P_max, name="charge")
         d = m.addMVar(shape=T, lb=0.0, ub=P_max, name="discharge")
         net_load = m.addMVar(shape=T, lb=-GRB.INFINITY, name="net_load")
 
@@ -1919,19 +2094,14 @@ def _optimize_battery_gurobi(
         if initial_soc is not None:
             # Open-horizon window: fixed start SOC, free terminal SOC (no cyclicity).
             m.addConstr(E[0] == initial_soc, name="Initial_SOC")
-        elif cycle_steps is None:
-            m.addConstr(E[0] == E[T], name="Cyclicity")
         else:
-            # Force the SOC equal at every cycle boundary (e.g. each midnight), so no
-            # energy is shifted across cycles.  Includes E[0] == E[T].
-            bnds = np.arange(0, T + 1, cycle_steps)
-            if bnds[-1] != T:
-                bnds = np.append(bnds, T)
-            m.addConstr(E[bnds[:-1]] == E[bnds[1:]], name="Cyclicity")
+            m.addConstr(E[0] == E[T], name="Cyclicity")
 
         m.setObjective(net_load @ net_load, GRB.MINIMIZE)
         m.optimize()
-        if m.Status != GRB.OPTIMAL:
+        # Accept a feasible incumbent even if the barrier could not certify it to
+        # tolerance (SUBOPTIMAL/NUMERIC); only bail when no solution exists at all.
+        if m.SolCount == 0:
             return None, None, None
 
         # ── Sign-fixing: enforce charge[t] * discharge[t] == 0 ────────────────
@@ -1942,10 +2112,11 @@ def _optimize_battery_gurobi(
         # discharge bounds are never both > 0, so complementarity holds by
         # construction.  Further passes only refine which steps may act.
         _TOL = 1e-9
-        cur_cub, cur_dub = charge_ub, np.full(T, P_max, dtype=float)
+        _full = np.full(T, P_max, dtype=float)
+        cur_cub, cur_dub = _full, _full
         for _ in range(max_signfix_passes):
             net = c.X - d.X
-            new_cub = np.where(net > _TOL, charge_ub, 0.0)
+            new_cub = np.where(net > _TOL, P_max, 0.0)
             new_dub = np.where(net < -_TOL, P_max, 0.0)
             if np.array_equal(new_cub, cur_cub) and np.array_equal(new_dub, cur_dub):
                 break  # sign pattern stable
@@ -1953,7 +2124,7 @@ def _optimize_battery_gurobi(
             c.UB = cur_cub
             d.UB = cur_dub
             m.optimize()
-            if m.Status != GRB.OPTIMAL:
+            if m.SolCount == 0:
                 return None, None, None
 
         return d.X - c.X, net_load.X, E.X[:-1]
@@ -2081,9 +2252,9 @@ def apply_battery_dispatch(
     if method == "annual":
         # Annual-cyclical perfect-foresight QP, one solve per zone and calendar year.
         # Identical objective/horizon to apply_reservoir_dispatch: minimise the sum of
-        # squared net residual load with E[0] == E[T] (passing initial_soc=None and
-        # cycle_steps=None selects that cyclicity), so `initial_soc_fraction` is unused
-        # here — the starting SOC is free and determined by the cyclicity constraint.
+        # squared net residual load with E[0] == E[T] (leaving initial_soc=None selects
+        # that cyclicity), so `initial_soc_fraction` is unused here — the starting SOC
+        # is free and determined by the cyclicity constraint.
         import gurobipy as gp
 
         time_index = pd.DatetimeIndex(rl_da["time"].values)
@@ -2251,8 +2422,6 @@ def apply_prosumer_battery_dispatch(
     initial_soc_fraction: float = 0.50,
     zone_dim: str = "zone",
     rl_var: str = "residual_load",
-    method: str = "heuristic",
-    min_soc_fraction: float | None = None,
 ) -> xr.Dataset:
     """Apply PV-aware prosumer battery dispatch to reduce residual load extremes.
 
@@ -2287,23 +2456,19 @@ def apply_prosumer_battery_dispatch(
         Name of the zone coordinate.
     rl_var : str
         Name of the residual-load variable.
-    method : str
-        ``"heuristic"`` (default) uses the PV-gated greedy loop with a daily SOC
-        reset described above.  ``"optimal"`` instead solves a per-zone,
-        per-calendar-year QP (via Gurobi) that minimises Σ(net residual load)²
-        under an SOC balance, power/energy bounds, **daily cyclicity** (SOC forced
-        equal at every midnight, no cross-day shifting), and a charging mask that
-        forbids charging when ``da_pv_generation == 0`` — the optimisation analogue
-        of the behind-the-meter, daily-cycling heuristic.
-    min_soc_fraction : float or None
-        Only used when ``method="optimal"``.  Lower bound on SOC as a fraction of
-        capacity at every step.  ``None`` = no floor.
-
     Returns
     -------
     xr.Dataset
         Same structure as :func:`apply_battery_dispatch`: adds
         ``residual_load_with_batteries``, ``soc_gwh``, ``battery_dispatch_gwh``.
+
+    Notes
+    -----
+    Prosumer batteries are always dispatched with this greedy rule: real home
+    batteries run a simple self-consumption controller, and the pipeline carries no
+    rooftop-PV or residential-load signal that would justify optimising them.  The
+    Gurobi QP (:func:`apply_battery_dispatch` with ``method="optimal"`` or
+    ``"annual"``) applies to utility / lumped storage.
     """
     one_way_eff = np.sqrt(roundtrip_efficiency)
 
@@ -2339,68 +2504,38 @@ def apply_prosumer_battery_dispatch(
     rl_new = rl_arr.copy()
     soc_arr = np.zeros_like(rl_arr)
 
-    if method == "optimal":
-        # QP per zone and calendar year; daily cyclicity (8 steps = 24 h at 3-hourly
-        # resolution) plus a PV-surplus charging mask reproduce the behind-the-meter,
-        # daily-cycling behaviour of the heuristic.
-        _CYCLE_STEPS = 8
-        for iz in range(n_zones):
-            cap = cap_by_zone[iz]
-            if cap <= 0.0:
-                continue
-            max_pwr = cap / battery_duration_h * 3.0
-            for year in np.unique(time_index.year):
-                year_mask = time_index.year == year
-                rl_year = rl_arr[iz, year_mask]
-                if np.all(np.isnan(rl_year)):
-                    continue
-                nan_mask = np.isnan(rl_year)
-                rl_solve = np.where(nan_mask, 0.0, rl_year)
-                charge_mask = pv_arr[iz, year_mask] > 0.0
-                _, net_load, soc = _optimize_battery_gurobi(
-                    rl_solve, cap, max_pwr, one_way_eff,
-                    min_soc_fraction=min_soc_fraction,
-                    charge_mask=charge_mask,
-                    cycle_steps=_CYCLE_STEPS,
-                )
-                if net_load is None:
-                    continue
-                idx = np.where(year_mask)[0]
-                rl_new[iz, idx] = np.where(nan_mask, np.nan, net_load)
-                soc_arr[iz, idx] = soc
-    else:
-        for iz in range(n_zones):
-            cap = cap_by_zone[iz]
-            if cap <= 0.0:
-                continue
+    for iz in range(n_zones):
+        cap = cap_by_zone[iz]
+        if cap <= 0.0:
+            continue
 
-            max_pwr = cap / battery_duration_h * 3.0
-            soc = cap * initial_soc_fraction
+        max_pwr = cap / battery_duration_h * 3.0
+        soc = cap * initial_soc_fraction
 
-            for t in range(n_time):
-                # Daily SOC reset at midnight (day boundary)
-                if t > 0 and time_hours[t] == 0:
-                    soc = cap * initial_soc_fraction
+        for t in range(n_time):
+            # Daily SOC reset at midnight (day boundary)
+            if t > 0 and time_hours[t] == 0:
+                soc = cap * initial_soc_fraction
 
-                rl_t = rl_arr[iz, t]
-                if np.isnan(rl_t):
-                    soc_arr[iz, t] = soc
-                    continue
-
-                solar_on = pv_arr[iz, t] > 0.0
-
-                if solar_on and rl_t < 0.0:
-                    # PV surplus → charge prosumer battery
-                    charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
-                    soc += charge * one_way_eff
-                    rl_new[iz, t] = rl_t + charge
-                elif (not solar_on) and rl_t > 0.0:
-                    # No sun, grid deficit → discharge prosumer battery
-                    discharge = min(rl_t, max_pwr, soc * one_way_eff)
-                    soc -= discharge / one_way_eff
-                    rl_new[iz, t] = rl_t - discharge
-
+            rl_t = rl_arr[iz, t]
+            if np.isnan(rl_t):
                 soc_arr[iz, t] = soc
+                continue
+
+            solar_on = pv_arr[iz, t] > 0.0
+
+            if solar_on and rl_t < 0.0:
+                # PV surplus → charge prosumer battery
+                charge = min(-rl_t, max_pwr, (cap - soc) / one_way_eff)
+                soc += charge * one_way_eff
+                rl_new[iz, t] = rl_t + charge
+            elif (not solar_on) and rl_t > 0.0:
+                # No sun, grid deficit → discharge prosumer battery
+                discharge = min(rl_t, max_pwr, soc * one_way_eff)
+                soc -= discharge / one_way_eff
+                rl_new[iz, t] = rl_t - discharge
+
+            soc_arr[iz, t] = soc
 
     orig_dims = ds_residual_zonal[rl_var].dims
     ds_out = ds_residual_zonal.copy()
@@ -2500,11 +2635,19 @@ def _optimize_reservoir_gurobi(
     m.addConstr(E[0] == E[T], name="Cyclicity")
     m.addConstr(net_load == residual_load - G, name="Net_Load_Def")
     m.setObjective(net_load @ net_load, GRB.MINIMIZE)
+    # A single year's residual load can be ill-conditioned (large dynamic range),
+    # so push the barrier for accuracy before falling back on the incumbent.
+    m.Params.NumericFocus = 3
     m.optimize()
 
-    if m.Status == GRB.OPTIMAL:
-        return G.X, net_load.X, E.X[:-1]
-    return None, None, None
+    # Accept the certified optimum, OR any feasible incumbent the barrier could not
+    # certify to tolerance (status SUBOPTIMAL/NUMERIC with SolCount > 0). Both
+    # satisfy the water-balance constraints exactly — only the optimality *proof* is
+    # missing — and using the near-optimal dispatch is far better than skipping the
+    # whole country-year (which would leave its residual load undispatched).
+    if m.Status == GRB.OPTIMAL or m.SolCount > 0:
+        return G.X, net_load.X, E.X[:-1], m.Status
+    return None, None, None, m.Status
 
 
 def apply_reservoir_dispatch(
@@ -2610,14 +2753,14 @@ def apply_reservoir_dispatch(
             )
 
             T = min(len(rl_year), len(inflow_year))
-            dispatch, net_load, storage = _optimize_reservoir_gurobi(
+            dispatch, net_load, storage, status = _optimize_reservoir_gurobi(
                 rl_year[:T], inflow_year[:T], E_max, P_max, min_storage_level_fraction,
                 efficiency=efficiency,
             )
 
             if dispatch is None:
                 if verbose:
-                    print(f"    {year}: Gurobi infeasible, skipping")
+                    print(f"    {year}: Gurobi infeasible (status={status}), skipping")
                 continue
 
             yr_idx = np.where(year_mask)[0][:T]
