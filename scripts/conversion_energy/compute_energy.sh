@@ -59,8 +59,8 @@ mkdir -p "logs/${scope}/${model}"
 # echo "Computing PV for CERRA..."
 # nice -10 python -u compute_pv.py "$paths_file" "$model" "$scenario" "$scope" 2>&1 | tee "logs/${scope}/${model}/pv_${current_date}.log"
 
-echo "Computing degree days for CERRA..."
-nice -10 python -u compute_degree_days.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/degree_days_${current_date}.log"
+# echo "Computing degree days for CERRA..."
+# nice -10 python -u compute_degree_days.py "$paths_file" "$model" "$scenario" 2>&1 | tee "logs/${scope}/${model}/degree_days_${current_date}.log"
 
 # Coefficients are derived once from CERRA degree days (needs compute_degree_days for CERRA first):
 # nice -10 python -u derive_demand_coefficients.py "$paths_file" 2>&1 | tee "logs/${scope}/${model}/derive_coeffs_${current_date}.log"

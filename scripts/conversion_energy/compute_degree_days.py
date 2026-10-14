@@ -24,6 +24,7 @@ from cordex2energy.utils.constants import (
     COMPRESSED_ZARR_ENCODING,
     BC_SUBDAILY_CHUNKS,
     CORDEX_TO_CERRA_VARS,
+    DEGREE_DAYS_DIRNAME,
     EXTENT_BC,
 )
 from cordex2energy.utils.utils_xarray import sel_extent
@@ -60,7 +61,7 @@ def parse_arguments():
 def setup_tmp_directories(paths, model_tag):
     path_data_temporary = Path(paths["path_data_temporary"])
     tmp_energy_data_dir = (
-        path_data_temporary / "energy" / "europe" / "degree_days" / model_tag
+        path_data_temporary / "energy" / "europe" / DEGREE_DAYS_DIRNAME / model_tag
     )
     tmp_energy_data_dir.mkdir(parents=True, exist_ok=True)
     return tmp_energy_data_dir
@@ -211,7 +212,7 @@ def concatenate_and_save_datasets(
         }
         for var in ds_demand.data_vars
     }
-    output_path = path_energy / "europe" / "degree_days" / f"{model_tag}.zarr"
+    output_path = path_energy / "europe" / DEGREE_DAYS_DIRNAME / f"{model_tag}.zarr"
     output_path.mkdir(parents=True, exist_ok=True)
 
     ds_demand.chunk(chunks_bc).to_zarr(

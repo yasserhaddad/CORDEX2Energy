@@ -40,10 +40,15 @@ def heating_degree_days(
     It is calculated as the difference between a reference temperature and the actual
     temperature, only when the actual temperature is below a specified base temperature.
 
+    Follows the Eurostat/EC definition, which is stated in terms of ``Tm``, the **mean air
+    temperature of the day**: ``if Tm <= 15 then HDD = 18 - Tm else 0``. The rule is non-linear,
+    so feeding it sub-daily temperatures and averaging afterwards is a different quantity — see
+    :func:`compute_cdd_hdd_xr` and its ``eurostat_daily`` argument.
+
     Parameters
     ----------
     x : np.ndarray
-        Array of temperatures (in degrees Celsius).
+        Array of **daily mean** temperatures (in degrees Celsius).
     reference_temp : float, optional
         Reference temperature (in degrees Celsius) used for the calculation.
         Default is 18°C.
@@ -69,10 +74,18 @@ def cooling_degree_days(
     Cooling degree days are a measure of how much (in degrees) and for how long
     the outside air temperature is above a certain base temperature. This is
     often used to estimate the energy demand for cooling buildings.
+
+    Follows the Eurostat/EC definition, which is stated in terms of ``Tm``, the **mean air
+    temperature of the day**: ``if Tm >= 24 then CDD = Tm - 21 else 0``. The rule is non-linear and
+    the threshold sits in the tail of the European temperature distribution, so applying it to
+    sub-daily temperatures and averaging afterwards gives a very different result — 8.6x the annual
+    CDD for the UK, 75x for Ireland. See :func:`compute_cdd_hdd_xr` and its ``eurostat_daily``
+    argument.
+
     Parameters
     ----------
     x : np.ndarray
-        Array of temperature values (in degrees Celsius).
+        Array of **daily mean** temperature values (in degrees Celsius).
     reference_temp : float, optional
         The reference temperature used for calculating the degree days.
         Default is 21°C.
@@ -93,32 +106,55 @@ def compute_cdd_hdd_xr(
     da_tas: xr.DataArray,
     da_pop_normalized: xr.DataArray,
     parallelized: bool = True,
+    eurostat_daily: bool = True,
 ) -> xr.Dataset:
+    """Population-weighted heating and cooling degree days from a temperature field.
+
+    ``eurostat_daily`` selects *what temperature the threshold is applied to*, which matters a
+    great deal because the degree-day rule is non-linear:
+
+    * ``True`` (default) — resample to the **daily mean** first, then apply the kernel. This is the
+      Eurostat/EC definition: "``Tm`` is the mean air temperature of day *i*".
+    * ``False`` — apply the kernel at the input (sub-daily) resolution and average afterwards. This
+      is the historical behaviour, retained so earlier products remain reproducible.
+
+    The two are not interchangeable. Sub-daily application counts warm afternoons on days whose mean
+    never reaches the base temperature, so it yields far more cooling degree days in cool climates —
+    on CERRA 1991-2020 the annual CDD ratio (sub-daily / Eurostat) is 1.4x for Spain but 8.6x for
+    the UK and 75x for Ireland. Heating is barely affected (<=7 %) because most of the year the
+    daily mean is well below the heating base temperature, so the threshold rarely binds.
+
+    *da_pop_normalized* is time-invariant, so it may be applied on either side of the daily mean.
+    """
     metrics_funcs = {
         "HDD": heating_degree_days,
         "CDD": cooling_degree_days,
     }
+    da_input = da_tas.resample(time="1D").mean("time") if eurostat_daily else da_tas
+
     list_ds = []
     for name, metric_func in metrics_funcs.items():
         ds_metric = xr.apply_ufunc(
             metric_func,
-            da_tas,
+            da_input,
             keep_attrs=True,
             dask="allowed" if parallelized else "forbidden",
         )
-        list_ds.append(
-            (
-                (
-                    (ds_metric * da_pop_normalized).resample(time="1D").mean("time")
-                ).rename(name)
-            )
-        )
+        weighted = ds_metric * da_pop_normalized
+        if not eurostat_daily:
+            weighted = weighted.resample(time="1D").mean("time")
+        list_ds.append(weighted.rename(name))
 
     ds_metric_weighted = xr.merge(list_ds)
     ds_metric_weighted.attrs["units"] = "degree days"
     ds_metric_weighted.attrs["long_name"] = "Degree days"
     ds_metric_weighted.attrs["description"] = (
         "Heating and cooling degree days calculated from temperature data."
+    )
+    ds_metric_weighted.attrs["definition"] = (
+        "eurostat_daily (threshold on the daily mean temperature)"
+        if eurostat_daily
+        else "sub-daily (threshold at input resolution, averaged to daily)"
     )
 
     return ds_metric_weighted

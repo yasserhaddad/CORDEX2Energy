@@ -92,9 +92,9 @@ def load_jrc_fec_series(jrc_dir: Path, name: str, edition: str = "2015") -> pd.D
     (years 2000–2015) or ``"2023"`` (years 2000–2023); both share the ``RES_hh_fec`` /
     ``SER_hh_fec`` sheets and row labels. Returns columns ``heat_thermal_gwh`` (all
     carriers), ``heat_electric_gwh`` (advanced + conventional electric heating,
-    residential + tertiary), ``cool_gwh`` (space cooling, ≈ all-electric), indexed by
-    year. Returns ``None`` if the country's files are absent (e.g. UK under 2023,
-    Switzerland, Norway, non-EU).
+    residential + tertiary), ``cool_gwh`` (space cooling, ≈ all-electric) and its
+    per-sector parts ``cool_res_gwh`` / ``cool_srv_gwh``, indexed by year. Returns ``None``
+    if the country's files are absent (e.g. UK under 2023, Switzerland, Norway, non-EU).
     """
     iso = next((i for i, n in _ISO_TO_NAME.items() if n == name), _JRC_ISO.get(name))
     if iso is None:
@@ -111,12 +111,19 @@ def load_jrc_fec_series(jrc_dir: Path, name: str, edition: str = "2015") -> pd.D
         _row(res, "Advanced electric heating") + _row(res, "Conventional electric heating")
         + _row(ser, "Advanced electric heating") + _row(ser, "Conventional electric heating")
     )
-    cool = _row(res, "Space cooling") + _row(ser, "Space cooling")
+    # Cooling is kept BOTH lumped (legacy consumers) and split by sector. The split matters because
+    # the service sector dominates the cooling energy (58-97 % across the domain) but is largely
+    # weather-insensitive baseload, while the residential part carries the emerging climate signal —
+    # so the two saturate with degree days at very different rates and must be fitted separately.
+    cool_res = _row(res, "Space cooling")
+    cool_srv = _row(ser, "Space cooling")
 
     out = pd.DataFrame({
         "heat_thermal_gwh": heat_thermal,
         "heat_electric_gwh": heat_electric,
-        "cool_gwh": cool,
+        "cool_gwh": cool_res + cool_srv,
+        "cool_res_gwh": cool_res,
+        "cool_srv_gwh": cool_srv,
     }) * KTOE_TO_GWH
     out.index = out.index.astype(int)
     out.index.name = "year"
@@ -169,8 +176,15 @@ def regress_coefficient(
       finding, not a coefficient to use.
 
     *years* optionally restricts the fit to a subset (e.g. a recent window). Returns
-    ``P_gw_per_degc`` (primary), ``r2_origin``, ``slope_trend``, ``beta``,
+    ``P_gw_per_degc`` (primary), ``r2_origin``, ``slope_trend``, ``beta``, ``intercept``,
     ``r2_trend``, ``n``.
+
+    ``intercept`` is the eq.11 fit's constant term, in the units of *energy_annual* (GWh/yr). For
+    cooling it is the **weather-insensitive** part of the series — commercial refrigeration and
+    ventilation, which do not follow degree days. It is large in cool countries (≈100 % of mean
+    cooling energy for the UK and Ireland), which is precisely why the through-origin
+    ``P_gw_per_degc`` degenerates there: with no intercept, that constant is forced onto the
+    degree-day slope.
     """
     idx = dd_annual.index.intersection(energy_annual.index)
     if years is not None:
@@ -181,7 +195,7 @@ def regress_coefficient(
     ok = np.isfinite(x) & np.isfinite(y)
     x, y, yr = x[ok], y[ok], yr[ok]
     nan = {"P_gw_per_degc": np.nan, "r2_origin": np.nan, "slope_trend": np.nan,
-           "beta": np.nan, "r2_trend": np.nan, "n": int(x.size)}
+           "beta": np.nan, "r2_trend": np.nan, "intercept": np.nan, "n": int(x.size)}
     if x.size < 3 or np.allclose(x, 0):
         return nan
 
@@ -197,7 +211,7 @@ def regress_coefficient(
 
     return {"P_gw_per_degc": s0 / 24.0, "r2_origin": float(r2_origin),
             "slope_trend": float(coef[1]) / 24.0, "beta": float(coef[2]),
-            "r2_trend": float(r2_trend), "n": int(x.size)}
+            "intercept": float(coef[0]), "r2_trend": float(r2_trend), "n": int(x.size)}
 
 
 def predict_trend(dd_annual: pd.Series, energy_annual: pd.Series) -> pd.Series:
@@ -334,45 +348,381 @@ def derive_coefficients(
 
 
 # ---------------------------------------------------------------------------
+# Sector-split cooling: pooled "space-for-time" saturation fit
+# ---------------------------------------------------------------------------
+# Cooling is fitted per sector in PER-CAPITA space, pooled across countries:
+#
+#     e_pc(c, y) = b_j(c) + p0_j · CDD(c,y)·s_j(CDD(c,y)) + β_j·(y − ȳ)
+#     s_j(x)     = 1 − exp(−θ_j·x)
+#
+# `θ_j` (curvature) and `p0_j` (intensity) are **shared across countries** — the
+# space-for-time assumption: warm countries today stand in for cool countries' future. This is
+# what makes the curvature identifiable at all, since within a single country CDD was essentially
+# flat over 2000-2020 and adoption showed up only as the year trend. `b_j(c)` is a per-country
+# weather-insensitive baseload; `β_j` exists solely to de-bias the slope and is **never projected**
+# (a linear year ramp is unbounded and climate-blind).
+#
+# The saturation sits INSIDE the level equation (the "absolute" form) rather than being applied as
+# a multiplier s(CDD)/s(CDD_ref). That removes the reference denominator, which is what blows up
+# where CDD_ref → 0 (Ireland ≈ 0.05 °C·d/yr) — with a shared intensity there is no per-country
+# denominator anywhere, so boundedness is structural instead of patched.
+
+#: Fit window. CERRA degree days end 2021-06-30, so 2021 is a partial year and is dropped.
+COOL_FIT_YEARS = range(2000, 2021)
+#: Window whose observed JRC total the anchor reproduces (see :func:`cooling_anchor_window`).
+COOL_ANCHOR_WINDOW = (2015, 2020)
+#: The UK is the only country on the JRC-2015 edition, which stops in 2015.
+COOL_ANCHOR_OVERRIDES = {"United Kingdom": (2010, 2015)}
+#: Candidate curvatures profiled when fitting ``θ``.
+COOL_THETA_GRID = np.geomspace(1e-5, 0.5, 500)
+#: Heat Roadmap Europe's published curvatures, for reference in diagnostics.
+HRE_THETA = {"res": 0.00225, "srv": 0.020}
+#: Minimum pooled R² for a candidate to be eligible in :func:`select_cooling_curvature`.
+COOL_R2_MIN = 0.85
+#: Trailing window (years) over which degree days are averaged before evaluating ``s(CDD)``.
+COOL_SMOOTH_YEARS = 5
+
+_COOL_SECTORS = {"res": "cool_res_gwh", "srv": "cool_srv_gwh"}
+
+
+def cooling_anchor_window(country: str) -> tuple[int, int]:
+    """Inclusive ``(first, last)`` year whose observed JRC cooling the anchor matches."""
+    return COOL_ANCHOR_OVERRIDES.get(country, COOL_ANCHOR_WINDOW)
+
+
+def _cooling_panel(cool_pc: pd.DataFrame, cdd_annual: pd.DataFrame) -> pd.DataFrame:
+    """Long ``(country, year, e_pc, cdd)`` panel of the aligned, finite observations."""
+    idx = cool_pc.index.intersection(cdd_annual.index)
+    frames = []
+    for c in [c for c in cool_pc.columns if c in cdd_annual.columns]:
+        sub = pd.DataFrame({"e_pc": cool_pc.loc[idx, c], "cdd": cdd_annual.loc[idx, c]})
+        sub = sub[np.isfinite(sub["e_pc"]) & np.isfinite(sub["cdd"])]
+        sub["country"], sub["year"] = c, sub.index.astype(float)
+        frames.append(sub)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def fit_pooled_cooling(
+    cool_pc: pd.DataFrame,
+    cdd_annual: pd.DataFrame,
+    theta: float | None = None,
+    fixed_effects: bool = True,
+    theta_grid: np.ndarray | None = None,
+) -> dict:
+    """Pooled space-for-time fit of one sector's cooling curvature and intensity.
+
+    *cool_pc* and *cdd_annual* are ``(year × country)`` frames of per-capita cooling energy
+    [GWh/yr per million capita] and annual degree days [°C·day/yr]. For a given ``θ`` the model is
+    linear, so it is solved by least squares over ``[country effects | CDD·s(CDD) | year − ȳ]``.
+    When *theta* is ``None`` the curvature is estimated by profiling the residual sum of squares
+    over *theta_grid*; pass a value to fit the remaining terms at a fixed curvature.
+    *fixed_effects* selects a per-country baseload (``True``) or a single shared constant.
+
+    Returns ``theta``, ``p0`` (shared intensity), ``b`` (per-country baseload Series, clamped at
+    ≥0 — a negative baseload is an unidentified term, not a physical result), ``r2``, ``width``
+    (how well ``θ`` is identified: the ratio of the largest to the smallest curvature whose RSS is
+    within 1 % of the minimum) and ``n``.
+
+    **``θ`` is a calibrated choice, not a sharp estimate.** The RSS profile is flat — ``width`` is
+    typically large, and HRE's published curvature costs only a few percent more RSS. In-sample fit
+    therefore cannot discriminate between saturating and near-linear adoption, even though they
+    imply very different end-century demand: a structural uncertainty to report, not something a
+    better regression settles. :func:`select_cooling_curvature` turns that into a stated rule.
+    """
+    panel = _cooling_panel(cool_pc, cdd_annual)
+    if len(panel) < 10:
+        return {"theta": np.nan, "p0": np.nan, "b": pd.Series(dtype=float),
+                "r2": np.nan, "width": np.inf, "n": 0}
+
+    if fixed_effects:
+        effects = pd.get_dummies(panel["country"], dtype=float)
+    else:
+        effects = pd.DataFrame({"const": np.ones(len(panel))}, index=panel.index)
+    year_c = panel["year"].to_numpy(float) - panel["year"].to_numpy(float).mean()
+    cdd = panel["cdd"].to_numpy(float)
+    y = panel["e_pc"].to_numpy(float)
+    ss_tot = ((y - y.mean()) ** 2).sum()
+    n_fe = effects.shape[1]
+
+    def solve(candidate: float):
+        weather = cdd * (1.0 - np.exp(-candidate * cdd))
+        design = np.column_stack([effects.to_numpy(), weather, year_c])
+        coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+        return coef, float(((y - design @ coef) ** 2).sum())
+
+    grid = COOL_THETA_GRID if theta_grid is None else np.asarray(theta_grid, float)
+    rss = np.array([solve(float(t))[1] for t in grid])
+    best = int(np.argmin(rss))
+    within = grid[rss <= rss[best] * 1.01]
+    width = float(within.max() / max(within.min(), 1e-12))
+    chosen = float(grid[best]) if theta is None else float(theta)
+    coef, chosen_rss = solve(chosen)
+    if fixed_effects:
+        baseload = pd.Series(coef[:n_fe], index=effects.columns)
+    else:
+        baseload = pd.Series(float(coef[0]), index=sorted(panel["country"].unique()))
+    return {
+        "theta": chosen,
+        "p0": float(coef[n_fe]),
+        "b": baseload.clip(lower=0.0),
+        "r2": 1.0 - chosen_rss / ss_tot if ss_tot > 0 else np.nan,
+        "width": width,
+        "n": len(panel),
+    }
+
+
+def cooling_country_groups(cdd_annual: pd.DataFrame, cool_twh: pd.Series) -> dict[str, list[str]]:
+    """Candidate country subsets for the curvature selection.
+
+    Curvature is only visible where a country actually cools, so alongside the full set the
+    selection also considers warmer / higher-consumption subsets: countries with essentially no
+    air-conditioning contribute observations clustered near ``CDD ≈ 0`` that carry no information
+    about how the response bends, and can flatten the profile.
+    """
+    mean_cdd = cdd_annual.mean()
+    everyone = [c for c in cdd_annual.columns if c in cool_twh.index]
+    return {
+        "all": everyone,
+        "CDD>50": [c for c in everyone if mean_cdd.get(c, 0.0) > 50],
+        "CDD>100": [c for c in everyone if mean_cdd.get(c, 0.0) > 100],
+        "cooling>1TWh": [c for c in everyone if cool_twh.get(c, 0.0) > 1.0],
+    }
+
+
+def select_cooling_curvature(
+    cool_pc: pd.DataFrame,
+    cdd_annual: pd.DataFrame,
+    groups: dict[str, list[str]],
+    r2_min: float = COOL_R2_MIN,
+    theta_grid: np.ndarray | None = None,
+) -> dict:
+    """Choose ``θ`` by a stated, reproducible identification rule.
+
+    Because the RSS profile is flat (see :func:`fit_pooled_cooling`), the minimum alone is not a
+    defensible estimate. Every combination of country *group* and specification (per-country
+    baseloads vs a single constant) is profiled, and among those whose pooled ``R² ≥ r2_min`` the
+    one whose curvature is **best identified** — the narrowest 1 %-RSS profile — is taken. Stated up
+    front and reproducible, rather than hand-picked.
+
+    Returns the winning ``theta`` plus its provenance (``group``, ``spec``, ``width``, ``r2``) and
+    the full candidate table under ``candidates``.
+    """
+    candidates, best = {}, None
+    for name, members in groups.items():
+        present = [c for c in members if c in cool_pc.columns]
+        if len(present) < 3:
+            continue
+        for fixed_effects in (True, False):
+            fit = fit_pooled_cooling(cool_pc[present], cdd_annual[present],
+                                     fixed_effects=fixed_effects, theta_grid=theta_grid)
+            spec = "FE" if fixed_effects else "noFE"
+            candidates[(name, spec)] = fit
+            eligible = np.isfinite(fit["r2"]) and fit["r2"] >= r2_min
+            if eligible and (best is None or fit["width"] < best["width"]):
+                best = {"theta": fit["theta"], "group": name, "spec": spec,
+                        "width": fit["width"], "r2": fit["r2"]}
+    if best is None:                     # nothing clears r2_min: fall back to the full-set FE fit
+        fit = fit_pooled_cooling(cool_pc, cdd_annual, theta_grid=theta_grid)
+        best = {"theta": fit["theta"], "group": "all", "spec": "FE",
+                "width": fit["width"], "r2": fit["r2"]}
+    best["candidates"] = candidates
+    return best
+
+
+def derive_cooling_coefficients(
+    jrc_dir: Path,
+    national_cdd: pd.DataFrame,
+    population: pd.Series,
+    edition: str = "2023",
+    fallback: tuple[Path, str] | None = None,
+    countries: list[str] | None = None,
+    smooth_years: int = COOL_SMOOTH_YEARS,
+    diagnostics: dict | None = None,
+) -> pd.DataFrame:
+    """Per-country sector-split cooling coefficients, in production units.
+
+    *national_cdd* is the ``(year × country)`` annual degree-day frame (from
+    :func:`national_annual_degree_days`); *population* is a per-country head count (persons).
+    Fits both sectors with :func:`fit_pooled_cooling`, gap-fills the countries JRC does not cover
+    (donor means from :data:`_PROXY_GROUPS`, taken in **per-capita** space so no population scaling
+    is needed), and returns the columns
+    :func:`~cordex2energy.conversion_energy.demand_model.cooling_demand` consumes:
+
+    ``P_cool_res`` / ``P_cool_srv``
+        weather coefficient ``pop·p0/24`` [GW per °C·day].
+    ``B_cool_res`` / ``B_cool_srv``
+        weather-insensitive baseload ``pop·b/8760`` [GW].
+    ``theta_cool_res`` / ``theta_cool_srv``
+        the fitted curvatures — global constants, repeated on every row so the coefficient CSV
+        remains the single interface.
+    ``cool_anchor_cdd``
+        annual CDD over the country's anchor window, needed to freeze adoption when it is off.
+    ``corrective_ratio_cool``
+        ``E_JRC(anchor) / E_model(anchor)`` — the optional level correction (M7 vs M7r).
+    ``cool_gap_filled``
+        1 where the country has no JRC data and the coefficients were borrowed.
+
+    Population is folded into ``P``/``B`` here, so the apply side needs no population data.
+    *smooth_years* must match the value used at apply time, otherwise the anchor no longer
+    reproduces the benchmark exactly. Pass a dict as *diagnostics* to receive the curvature
+    provenance and the per-sector fits.
+    """
+    names = list(national_cdd.columns) if countries is None else list(countries)
+    fec = {}
+    for name in names:
+        series = load_jrc_fec_series(jrc_dir, name, edition)
+        if series is None and fallback is not None:
+            series = load_jrc_fec_series(fallback[0], name, fallback[1])
+        if series is not None:
+            fec[name] = series
+    if not fec:
+        return pd.DataFrame()
+
+    years = [y for y in COOL_FIT_YEARS if y in national_cdd.index]
+    pop_m = {c: float(population.loc[c]) / 1e6 for c in names if c in population.index}
+    fitted = sorted(c for c in fec if c in national_cdd.columns and c in pop_m)
+
+    cdd_annual = national_cdd.loc[years, fitted]
+    cool_twh = pd.Series(
+        {c: sum(fec[c][v].reindex(years).mean() for v in _COOL_SECTORS.values()) / 1e3
+         for c in fitted}
+    )
+    groups = cooling_country_groups(cdd_annual, cool_twh)
+
+    # Two stages, as validated in the notebook: the curvature is chosen by the identification rule
+    # (which may favour a warm subset, where the bend is actually visible), then the intensity and
+    # the per-country baseloads are fitted on ALL countries with fixed effects at that curvature,
+    # so every country gets its own baseload and the shared intensity spans the full domain.
+    fits, chosen = {}, {}
+    for sector, col in _COOL_SECTORS.items():
+        cool_pc = pd.DataFrame(
+            {c: fec[c][col].reindex(years) / pop_m[c] for c in fitted}, index=years
+        )
+        chosen[sector] = select_cooling_curvature(cool_pc, cdd_annual, groups)
+        fits[sector] = fit_pooled_cooling(cool_pc, cdd_annual, theta=chosen[sector]["theta"])
+    if diagnostics is not None:
+        diagnostics.update({"chosen": chosen, "fits": fits, "groups": groups})
+
+    # Baseloads for countries JRC lacks: donor mean of the PER-CAPITA value. Taken per capita, the
+    # fill needs no population ratio — multiplying by the country's own population below reproduces
+    # `parameter_fill_ninja`'s `mean × N/N_ref` exactly.
+    baseload = {s: fits[s]["b"].copy() for s in _COOL_SECTORS}
+    gap_filled = []
+    for country in names:
+        if country in fitted or country not in pop_m:
+            continue
+        donors = [d for d in _PROXY_GROUPS.get(country, []) if d in fitted]
+        if not donors:
+            continue
+        for sector in _COOL_SECTORS:
+            baseload[sector][country] = float(baseload[sector][donors].mean())
+        gap_filled.append(country)
+
+    # The adoption share is evaluated on a trailing mean at apply time, so the anchor must use the
+    # same smoothing — otherwise `s` differs between derivation and application and the anchored
+    # model no longer reproduces the benchmark exactly.
+    smoothed = national_cdd.astype(float).rolling(smooth_years, min_periods=1).mean()
+
+    def model_window_pc(country: str, window: list[int]) -> float:
+        """Per-capita modelled cooling [GWh/yr per Mcap] averaged over the anchor window."""
+        total = 0.0
+        for sector in _COOL_SECTORS:
+            share = 1.0 - np.exp(-fits[sector]["theta"] * smoothed.loc[window, country])
+            weather = (national_cdd.loc[window, country] * share).mean()
+            total += float(baseload[sector].get(country, np.nan)) + fits[sector]["p0"] * weather
+        return float(total)
+
+    rows = {}
+    for country in names:
+        if country not in pop_m or country not in national_cdd.columns:
+            continue
+        if not all(np.isfinite(baseload[s].get(country, np.nan)) for s in _COOL_SECTORS):
+            continue
+        first, last = cooling_anchor_window(country)
+        window = [y for y in range(first, last + 1) if y in national_cdd.index]
+        cdd_a = float(smoothed.loc[window, country].mean())
+        row = {"cool_anchor_cdd": cdd_a,
+               "cool_gap_filled": float(country in gap_filled)}
+        for sector in _COOL_SECTORS:
+            row[f"P_cool_{sector}"] = pop_m[country] * fits[sector]["p0"] / 24.0
+            row[f"B_cool_{sector}"] = pop_m[country] * float(baseload[sector][country]) / 8760.0
+            row[f"theta_cool_{sector}"] = fits[sector]["theta"]
+        if country in fec:
+            observed = sum(fec[country][c].reindex(window).mean() for c in _COOL_SECTORS.values())
+            modelled = model_window_pc(country, window) * pop_m[country]
+            row["corrective_ratio_cool"] = (float(observed) / modelled if modelled > 0 else np.nan)
+        else:
+            row["corrective_ratio_cool"] = np.nan
+        rows[country] = row
+
+    out = pd.DataFrame(rows).T
+    # Countries without a benchmark cannot have their own anchor: borrow the donor group's mean.
+    ratio = out["corrective_ratio_cool"]
+    for country in gap_filled:
+        donors = [d for d in _PROXY_GROUPS.get(country, []) if d in ratio.index]
+        finite = [d for d in donors if np.isfinite(ratio.get(d, np.nan))]
+        if finite:
+            out.loc[country, "corrective_ratio_cool"] = float(ratio[finite].mean())
+    out["corrective_ratio_cool"] = out["corrective_ratio_cool"].fillna(1.0)
+    return out.sort_index()
+
+
+# ---------------------------------------------------------------------------
 # Gap-fill missing countries (Switzerland, Norway, non-EU)
 # ---------------------------------------------------------------------------
 
 _POWER_COLS = ["P_heat_thermal", "P_heat_elec", "P_cool"]
+
+#: World-Bank population spellings that differ from the canonical country names.
+WB_POP_ALIAS = {
+    "Czech Republic": "Czechia",
+    "Slovakia": "Slovak Republic",
+}
+
+#: Donor countries for every state JRC-IDEES does not cover, shared by all gap-fills.
+#: Switzerland/Norway follow ``tyndp._DEFAULT_NON_EU_PROXIES`` (alpine / Nordic analogues);
+#: the SE-European group and Ukraine follow ``parameter_fill_ninja``'s neighbour means.
+_PROXY_GROUPS: dict[str, list[str]] = {
+    "Switzerland": ["Austria"],
+    "Norway": ["Sweden"],
+    "Ukraine": ["Poland", "Slovakia", "Hungary", "Romania"],
+    **{c: ["Italy", "Austria", "Hungary", "Romania", "Bulgaria", "Greece"]
+       for c in ["Albania", "Bosnia and Herzegovina", "Kosovo", "Montenegro",
+                 "North Macedonia", "Serbia"]},
+}
+
+
+def world_bank_population(world_bank_pop_path: Path, year: str = "2020") -> pd.Series:
+    """World-Bank population indexed by **canonical** country name (aliases resolved)."""
+    pop = (
+        pd.read_csv(world_bank_pop_path, skiprows=3)[["Country Name", year]]
+        .set_index("Country Name")[year]
+    )
+    inverse = {v: k for k, v in WB_POP_ALIAS.items()}
+    return pop.rename(index=lambda n: inverse.get(n, n))
 
 
 def fill_missing_coefficients(df: pd.DataFrame, world_bank_pop_path: Path) -> pd.DataFrame:
     """Add rows for countries JRC lacks, mirroring ``fill_missing_country_params``.
 
     Neighbour-mean / proxy for the rate-like columns; the power columns are scaled by
-    the World-Bank 2020 population ratio. Switzerland ← Austria, Norway ← Sweden (as
-    the reference ``compute_share_df`` does), plus the SE-European small states,
-    Luxembourg, Ukraine, Cyprus and Malta if absent.
+    the World-Bank 2020 population ratio. Donors come from :data:`_PROXY_GROUPS`
+    (Switzerland ← Austria, Norway ← Sweden, the SE-European small states and Ukraine).
     """
     df = df.copy()
-    pop = (
-        pd.read_csv(world_bank_pop_path, skiprows=3)[["Country Name", "2020"]]
-        .set_index("Country Name")["2020"]
-    )
-    wb_alias = {"North Macedonia": "North Macedonia", "Slovakia": "Slovak Republic"}
-
-    def npop(country: str) -> float:
-        return float(pop.loc[wb_alias.get(country, country)])
+    pop = world_bank_population(world_bank_pop_path)
 
     def proxy(country: str, refs: list[str]):
         present = [r for r in refs if r in df.index]
         if not present:
             return
         df.loc[country] = df.loc[present].mean()
-        ref_pop = float(pop.loc[[wb_alias.get(r, r) for r in present]].mean())
-        df.loc[country, _POWER_COLS] *= npop(country) / ref_pop
+        power = [c for c in _POWER_COLS if c in df.columns]
+        df.loc[country, power] *= float(pop.loc[country]) / float(pop.loc[present].mean())
 
-    proxy("Switzerland", ["Austria"])
-    proxy("Norway", ["Sweden"])
-    neighbours = ["Italy", "Austria", "Hungary", "Romania", "Bulgaria", "Greece"]
-    for country in ["Albania", "Bosnia and Herzegovina", "Kosovo", "Montenegro",
-                    "North Macedonia", "Serbia"]:
-        if country not in df.index:
-            proxy(country, neighbours)
-    if "Ukraine" not in df.index:
-        proxy("Ukraine", ["Poland", "Slovakia", "Hungary", "Romania"])
+    proxy("Switzerland", _PROXY_GROUPS["Switzerland"])
+    proxy("Norway", _PROXY_GROUPS["Norway"])
+    for country, refs in _PROXY_GROUPS.items():
+        if country not in ("Switzerland", "Norway") and country not in df.index:
+            proxy(country, refs)
     return df.sort_index()

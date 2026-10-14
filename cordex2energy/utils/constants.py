@@ -19,6 +19,13 @@ NEAR_FUTURE_PERIOD = ["2021", "2050"]
 MID_CENTURY_PERIOD = ["2036", "2065"]
 END_CENTURY_PERIOD = ["2071", "2100"]
 
+#: Folder under ``energy/europe/`` holding the gridded degree-day product.
+#: Bumped to a new name when the Eurostat definition was adopted (threshold on the DAILY MEAN
+#: temperature rather than sub-daily; see ``conversion_energy.demand.compute_cdd_hdd_xr``). The old
+#: ``degree_days`` folder is left in place deliberately — every published paper result so far is
+#: built on it, and the two definitions differ by up to 75x in annual CDD for cool countries.
+DEGREE_DAYS_DIRNAME = "degree_days_eurostat"
+
 EXTENT_BC = {"lat_min": 30, "lat_max": 75, "lon_min": -30, "lon_max": 41}
 EXTENT_BC_MRRO = {"lat_min": 20.8, "lat_max": 71.8, "lon_min": -51.7, "lon_max": 72.7}
 EXTENT_CH = {"lat_min": 45.8, "lat_max": 47.9, "lon_min": 5.9, "lon_max": 10.5}

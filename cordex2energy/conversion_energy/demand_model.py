@@ -132,25 +132,158 @@ def compute_national_degree_days(
 def degree_days_to_demand(
     national_dd: pd.DataFrame,
     coefficient: pd.Series,
-    ac_growth: Callable[[int], float] | pd.Series | None = None,
+    ac_growth: Callable[[int], float] | pd.Series | pd.DataFrame | None = None,
+    baseload: pd.Series | None = None,
+    corrective_ratio: pd.Series | None = None,
 ) -> pd.DataFrame:
-    """Daily national demand = coefficient · degree days (× optional AC growth).
+    """Daily national demand = baseload + coefficient · degree days (× optional AC growth).
 
-    *coefficient* is a per-country Series (GW per °C·day). *ac_growth* (cooling only) is
-    an optional exogenous multiplier: a callable ``year -> factor`` or a Series indexed by
-    year. Countries absent from *coefficient* are dropped.
+    *coefficient* is a per-country Series (GW per °C·day). Countries absent from *coefficient*
+    are dropped. *ac_growth* (cooling only) is an optional adoption multiplier, one of:
+
+    * a callable ``year -> factor`` or a Series indexed by year — the same factor for every
+      country (an exogenous ramp);
+    * a **DataFrame** indexed by year (or by time) with one column per country — a per-country
+      factor, which is what a climate-driven adoption term needs, since saturation depends on each
+      country's own degree days (see :func:`cooling_adoption_factor`).
+
+    *baseload* (cooling only, GW) is the **weather-insensitive** part of the demand — commercial
+    refrigeration and ventilation, which run irrespective of degree days. Carrying it separately is
+    what keeps *coefficient* a genuine climate response: with a through-origin form that constant is
+    forced onto the degree-day slope, which is unbounded where degree days approach zero (Ireland
+    gets ~0.04 °C·d/yr under the Eurostat definition). The AC-growth multiplier is applied to the
+    **weather term only**, since adoption scales the cooling response, not the refrigeration load.
+
+    *corrective_ratio* (per country) scales the **total** — baseload *and* weather — after both are
+    assembled. It is the optional level correction that pins modelled demand to an observed
+    benchmark; being a per-country scalar it cancels in any ratio, so it shifts the level and leaves
+    the climate response, the saturation and the inter-chain ordering untouched.
     """
     cols = [c for c in national_dd.columns if c in coefficient.index and np.isfinite(coefficient[c])]
     demand = national_dd[cols].mul(coefficient[cols], axis=1)
 
     if ac_growth is not None:
         years = demand.index.year
-        if callable(ac_growth):
-            factor = pd.Series([ac_growth(int(y)) for y in years], index=demand.index)
+        if isinstance(ac_growth, pd.DataFrame):
+            factor = ac_growth.copy()
+            if isinstance(factor.index, pd.DatetimeIndex):
+                factor.index = factor.index.year
+            factor = factor.reindex(index=years, columns=cols).astype(float)
+            factor.index = demand.index
+            demand = demand.mul(factor.fillna(1.0))
         else:
-            factor = pd.Series(years, index=demand.index).map(ac_growth).astype(float)
-        demand = demand.mul(factor, axis=0)
+            if callable(ac_growth):
+                scalar = pd.Series([ac_growth(int(y)) for y in years], index=demand.index)
+            else:
+                scalar = pd.Series(years, index=demand.index).map(ac_growth).astype(float)
+            demand = demand.mul(scalar, axis=0)
+
+    if baseload is not None:
+        shared = [c for c in cols if c in baseload.index and np.isfinite(baseload[c])]
+        demand[shared] = demand[shared].add(baseload[shared], axis=1)
+
+    if corrective_ratio is not None:
+        shared = [c for c in cols if c in corrective_ratio.index
+                  and np.isfinite(corrective_ratio[c])]
+        demand[shared] = demand[shared].mul(corrective_ratio[shared], axis=1)
     return demand
+
+
+#: Sector suffixes of the sector-split cooling coefficients.
+_COOL_SECTORS = ("res", "srv")
+#: Columns :func:`cooling_demand` needs; their absence means an older coefficient file.
+COOLING_SPLIT_COLUMNS = (
+    [f"{p}_cool_{s}" for s in _COOL_SECTORS for p in ("P", "B", "theta")]
+    + ["cool_anchor_cdd", "corrective_ratio_cool"]
+)
+
+
+def cooling_adoption_factor(
+    cdd_annual: pd.DataFrame,
+    theta: float,
+    smooth_years: int = 5,
+    freeze_at: pd.Series | None = None,
+) -> pd.DataFrame:
+    """AC-adoption multiplier ``s(CDD) = 1 − exp(−θ·CDD)`` per country and year.
+
+    *cdd_annual* is a ``(year × country)`` frame of annual degree days. The factor is evaluated on a
+    **trailing mean** over *smooth_years*: an air-conditioner installed after a hot summer stays
+    installed, so penetration tracks the sustained climate rather than a single year — and without
+    the smoothing a steep saturation curve would amplify interannual degree-day swings into
+    year-to-year noise.
+
+    With *freeze_at* (a per-country Series of reference degree days, e.g. ``cool_anchor_cdd``) the
+    factor is held constant at ``s(CDD_ref)`` — **frozen penetration**: cooling still grows with
+    warming through the degree days themselves, but no *new* air-conditioning is installed. That is
+    the coherent no-adoption counterfactual. (A refitted linear form is *not*: pooled across
+    countries its slope is anchored by the already-saturated warm ones, so it over-states the cool
+    countries and can sit spuriously above the adoption curve.)
+    """
+    if freeze_at is not None:
+        frozen = 1.0 - np.exp(-theta * freeze_at.astype(float))
+        return pd.DataFrame(
+            {c: np.full(len(cdd_annual), frozen.get(c, np.nan)) for c in cdd_annual.columns},
+            index=cdd_annual.index,
+        )
+    smoothed = cdd_annual.astype(float).rolling(smooth_years, min_periods=1).mean()
+    return 1.0 - np.exp(-theta * smoothed)
+
+
+def cooling_demand(
+    national_cdd: pd.DataFrame,
+    coefficients: pd.DataFrame,
+    apply_corrective_ratio: bool = True,
+    ac_growth: bool = True,
+    smooth_years: int = 5,
+) -> pd.DataFrame:
+    """Daily national cooling demand [GW] from the sector-split saturating model.
+
+    For each sector ``j`` (residential, service)::
+
+        E_j(t) = k_c · [ B_j(c) + P_j(c) · CDD(t) · s_j(CDD_annual(t)) ]
+
+    with ``P_j``/``B_j`` the per-country weather coefficient and baseload (population already folded
+    in by :func:`~cordex2energy.conversion_energy.demand_coefficients.derive_cooling_coefficients`),
+    ``s_j`` the saturating adoption share, and ``k_c`` the optional level anchor. The sectors are
+    summed. Splitting them matters because the service sector dominates the cooling energy but is
+    largely weather-insensitive and close to saturation, while the residential part carries the
+    emerging climate signal — a lumped fit mixes the two and can lose the signal entirely.
+
+    *national_cdd* is the **daily** population-weighted national CDD frame; the annual sums driving
+    the adoption term are derived from it, so the model is self-consistent.
+
+    * ``apply_corrective_ratio`` (default ``True``) applies ``corrective_ratio_cool``, pinning
+      present-day demand to the observed JRC benchmark — the recommended form. Set ``False`` for the
+      benchmark-free variant, which reproduces the *historical average* level instead and is the
+      right choice where no benchmark exists.
+    * ``ac_growth`` (default ``True``) lets the adoption share follow the projected climate. Set
+      ``False`` to freeze penetration at each country's anchor climate (no new air-conditioning);
+      an anchored run then still reproduces the benchmark exactly.
+    """
+    missing = [c for c in COOLING_SPLIT_COLUMNS if c not in coefficients.columns]
+    if missing:
+        raise ValueError(
+            "coefficients lack the sector-split cooling columns "
+            f"{missing} — regenerate them with derive_demand_coefficients.py"
+        )
+    annual = national_cdd.resample("YS").sum()
+    annual.index = annual.index.year
+    freeze = None if ac_growth else coefficients["cool_anchor_cdd"]
+    ratio = coefficients["corrective_ratio_cool"] if apply_corrective_ratio else None
+
+    total = None
+    for sector in _COOL_SECTORS:
+        theta = float(coefficients[f"theta_cool_{sector}"].dropna().iloc[0])
+        factor = cooling_adoption_factor(annual, theta, smooth_years, freeze_at=freeze)
+        part = degree_days_to_demand(
+            national_cdd,
+            coefficients[f"P_cool_{sector}"],
+            ac_growth=factor,
+            baseload=coefficients[f"B_cool_{sector}"],
+            corrective_ratio=ratio,
+        )
+        total = part if total is None else total.add(part, fill_value=0.0)
+    return total
 
 
 def apply_diurnal_profile(
