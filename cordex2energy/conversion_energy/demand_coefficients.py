@@ -680,7 +680,8 @@ WB_POP_ALIAS = {
 }
 
 #: Donor countries for every state JRC-IDEES does not cover, shared by all gap-fills.
-#: Switzerland/Norway follow ``tyndp._DEFAULT_NON_EU_PROXIES`` (alpine / Nordic analogues);
+#: Switzerland/Norway follow ``_DEFAULT_NON_EU_PROXIES`` in ``cordex2energy_analysis.power_system``
+#: (alpine / Nordic analogues);
 #: the SE-European group and Ukraine follow ``parameter_fill_ninja``'s neighbour means.
 _PROXY_GROUPS: dict[str, list[str]] = {
     "Switzerland": ["Austria"],

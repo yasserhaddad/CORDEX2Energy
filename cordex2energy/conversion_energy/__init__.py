@@ -4,5 +4,5 @@ Import directly from the submodule you need:
 
     from cordex2energy.conversion_energy.wind import WindPower
     from cordex2energy.conversion_energy.pv import PVPower
-    from cordex2energy.conversion_energy.tyndp import compute_residual_load
+    from cordex2energy.conversion_energy.tyndp import build_tyndp_zone_geometries
 """
