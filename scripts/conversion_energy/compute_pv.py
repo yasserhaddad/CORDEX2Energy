@@ -1,7 +1,6 @@
 import argparse
 import json
 import shutil
-import sys
 import time
 from pathlib import Path
 import os
@@ -31,6 +30,74 @@ from cordex2energy.utils.utils_xarray import (
     sanitize_netcdf_attrs,
 )
 from cordex2energy.conversion_energy.aggregate_data import aggregate_data_per_country
+
+# CERRA ssrd[t] is accumulated over (t - 3h, t], so it is labelled at the end of its window.
+# CORDEX rsds is labelled at the window midpoint. CERRA is moved onto the same midpoint labels,
+# so that the solar position is evaluated at the centre of each window for both sources.
+CERRA_END_TO_MIDPOINT = pd.Timedelta(hours=1, minutes=30)
+
+
+def cerra_window_ends(start_year, end_year, include_window_start=False):
+    """Return the CERRA time slice whose windows cover ``start_year`` to ``end_year``.
+
+    Parameters
+    ----------
+    start_year, end_year : int
+        First and last calendar year to cover.
+    include_window_start : bool, optional
+        If True, also include the instant at the start of the first window. Instantaneous
+        variables need it to average the two ends of each window.
+
+    Returns
+    -------
+    slice
+        Time slice on CERRA's end-of-window labels.
+    """
+    first = "00:00" if include_window_start else "03:00"
+    return slice(f"{start_year}-01-01 {first}", f"{end_year + 1}-01-01 00:00")
+
+
+def to_window_midpoints(data):
+    """Move CERRA end-of-window labels to the window midpoints and drop 29 February.
+
+    Parameters
+    ----------
+    data : xarray.Dataset
+        CERRA data labelled at the end of each 3-hour window.
+
+    Returns
+    -------
+    xarray.Dataset
+        The same data labelled at the window midpoints, without the windows centred on
+        29 February.
+    """
+    data = data.assign_coords(time=data.time - CERRA_END_TO_MIDPOINT)
+    leap_day = (data.time.dt.month == 2) & (data.time.dt.day == 29)
+    return data.sel(time=~leap_day)
+
+
+def window_mean(instantaneous, window_ends):
+    """Average an instantaneous CERRA variable over each 3-hour window.
+
+    Parameters
+    ----------
+    instantaneous : xarray.Dataset
+        Values at 00:00, 03:00, 06:00, …
+    window_ends : xarray.DataArray
+        End-of-window time labels.
+
+    Returns
+    -------
+    xarray.Dataset
+        Mean of the values at the start and end of each window, labelled at the window end.
+        Where one of the two instants is missing (2t and 10si have no 29 February), the other
+        is used alone.
+    """
+    window_starts = window_ends.values - pd.Timedelta(hours=3)
+    at_start = instantaneous.reindex(time=window_starts).assign_coords(time=window_ends.values)
+    at_end = instantaneous.reindex(time=window_ends.values)
+    return xr.concat([at_start, at_end], dim="bound").mean("bound", skipna=True)
+
 
 os.environ["OMP_NUM_THREADS"] = "1"  # OpenMP
 os.environ["MKL_NUM_THREADS"] = "1"  # MKL
@@ -121,12 +188,15 @@ if __name__ == "__main__":
             cerra_reg / f"{CORDEX_TO_CERRA_VARS['rsds']}.zarr",
             extent=extent,
             chunks="auto",
+            drop_leap_days=False,
         )
-        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=slice("1991", "2020"))
+        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=cerra_window_ends(1991, 2020))
         time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
         ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
         ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
-        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["rsds"]: "rsds"})
+        ds_rsds_bc.ds_data = to_window_midpoints(
+            ds_rsds_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["rsds"]: "rsds"})
+        )
     else:
         ds_rsds_bc = ClimateModelData(
             path_data_processed
@@ -198,9 +268,11 @@ if __name__ == "__main__":
             cerra_reg = path_data_processed / "cerra_processed" / "regridded"
             ds_rsds_bc = ClimateReanalysisData(
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['rsds']}.zarr",
-                extent=extent, chunks="auto",
+                extent=extent, chunks="auto", drop_leap_days=False,
             )
-            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=slice("1991", "2020"))
+            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(
+                time=cerra_window_ends(start_year, end_year)
+            )
             time_res_s = get_time_resolution(ds_rsds_bc.ds_data).total_seconds()
             ds_rsds_bc.ds_data = ds_rsds_bc.ds_data / time_res_s
             ds_rsds_bc.ds_data[CORDEX_TO_CERRA_VARS["rsds"]].attrs["units"] = "W m**-2"
@@ -212,7 +284,9 @@ if __name__ == "__main__":
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['tas']}.zarr",
                 extent=extent, chunks="auto",
             )
-            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=slice("1991", "2020"))
+            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(
+                time=cerra_window_ends(start_year, end_year, include_window_start=True)
+            )
             ds_tas_bc.ds_data = (
                 ds_tas_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["tas"]: "tas"})
                 .squeeze("height", drop=True)
@@ -222,7 +296,9 @@ if __name__ == "__main__":
                 cerra_reg / f"{CORDEX_TO_CERRA_VARS['sfcWind']}.zarr",
                 extent=extent, chunks="auto",
             )
-            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(time=slice("1991", "2020"))
+            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(
+                time=cerra_window_ends(start_year, end_year, include_window_start=True)
+            )
             ds_sfcWind_bc.ds_data = (
                 ds_sfcWind_bc.ds_data.rename({CORDEX_TO_CERRA_VARS["sfcWind"]: "sfcWind"})
                 .squeeze("height", drop=True)
@@ -260,10 +336,11 @@ if __name__ == "__main__":
                 extent=extent,
                 chunks="auto",
             )
-        time_slice = slice(str(start_year), str(end_year))
-        ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=time_slice)
-        ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=time_slice)
-        ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(time=time_slice)
+        if not is_cerra:
+            time_slice = slice(str(start_year), str(end_year))
+            ds_rsds_bc.ds_data = ds_rsds_bc.ds_data.sel(time=time_slice)
+            ds_tas_bc.ds_data = ds_tas_bc.ds_data.sel(time=time_slice)
+            ds_sfcWind_bc.ds_data = ds_sfcWind_bc.ds_data.sel(time=time_slice)
         # Check if all datasets have the same lat, lon, and time
         for coord in ["lat", "lon"]:
             arrs = [
@@ -276,25 +353,21 @@ if __name__ == "__main__":
 
         print("Matching instantaneous to mean values")
         if is_cerra:
-            # CERRA is already 3-hourly. ssrd[t] is the mean flux over (t-3h, t);
+            # CERRA is already 3-hourly. ssrd[t] is the mean flux over (t-3h, t];
             # 2t and 10si are instantaneous at 00:00, 03:00, 06:00, …
-            # A rolling 2-point mean gives (f[t-3h] + f[t]) / 2, which matches the
-            # ssrd window without expanding the time axis to hourly resolution.
+            # Averaging the values at t-3h and t matches the ssrd window without
+            # expanding the time axis to hourly resolution. All three are then
+            # labelled at the window midpoint, as CORDEX is.
+            window_ends = ds_rsds_bc.ds_data.time
             with ProgressBar(dt=60):
-                ds_tas_bc.ds_data = (
-                    (ds_tas_bc.ds_data - 273.15)
-                    .rolling(time=2, min_periods=2)
-                    .mean()
-                    .sel(time=ds_rsds_bc.ds_data.time)
-                    .persist()
-                )
-                ds_sfcWind_bc.ds_data = (
-                    ds_sfcWind_bc.ds_data
-                    .rolling(time=2, min_periods=2)
-                    .mean()
-                    .sel(time=ds_rsds_bc.ds_data.time)
-                    .persist()
-                )
+                ds_tas_bc.ds_data = window_mean(
+                    ds_tas_bc.ds_data - 273.15, window_ends
+                ).persist()
+                ds_sfcWind_bc.ds_data = window_mean(
+                    ds_sfcWind_bc.ds_data, window_ends
+                ).persist()
+            for dataset in (ds_rsds_bc, ds_tas_bc, ds_sfcWind_bc):
+                dataset.ds_data = to_window_midpoints(dataset.ds_data)
         else:
             with ProgressBar(dt=60):
                 ds_tas_bc.ds_data = match_instaneous_to_mean_values(
